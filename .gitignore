@@ -1,2 +1,5 @@
 # Compiled output
 /orbitalis_data_large
+
+*.csv
+*.db
