@@ -28,6 +28,7 @@ df_maintenance.loc[df_maintenance['technicien'].isna(), 'technicien'] = 'technic
 
 df_orbite = df_orbite.sort_values(['site_id', 'timestamp'])
 df_orbite['temperature_ambiante_c'] = (df_orbite.groupby('site_id')['temperature_ambiante_c'].transform(lambda x: x.interpolate(method='linear')))
-print(df_orbite[df_orbite.isna().any(axis=1)])
+
+print(df_sites[df_sites.isna().any(axis=1)])
 
 #df.loc[df['col'].isna(), 'col'] = 'valeur_corrigee'
