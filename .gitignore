@@ -1,5 +1,7 @@
 # Compiled output
 /orbitalis_data_large
+/_pycache_
 
 *.csv
 *.db
+

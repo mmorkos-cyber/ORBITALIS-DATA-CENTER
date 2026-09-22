@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import sqlite3
 
-root = os.path.dirname(os.path.abspath(__file__))
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 dossier_data = os.path.join(root, "orbitalis_data_large")
 
 fichier_data_alarmes = os.path.join(dossier_data, "alarmes.json")
