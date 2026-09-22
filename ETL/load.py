@@ -1,7 +1,6 @@
 from datasets import load_dataset
 import sqlite3
 from pathlib import Path
-import time
 import pandas as pd
 from transform import df_alarmes, df_equipement, df_maintenance, df_orbite, df_sites, df_telemetrie, df_modeles, df_seuils_alarmes, df_references_sites
 
@@ -86,7 +85,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS equipement (
             equipement_id TEXT PRIMARY KEY,
-            date_installation TEXT,
+            date_installation DATETIME,
             statut TEXT,
             site_id TEXT,
             modele_id TEXT,
@@ -106,8 +105,8 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS maintenance (
             maintenance_id TEXT PRIMARY KEY,
-            date_debut TEXT,
-            date_fin TEXT,
+            date_debut DATETIME,
+            date_fin DATETIME,
             type_intervention TEXT,
             technicien TEXT,
             cout_eur INTEGER,
@@ -126,7 +125,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS phase_orbitale (
             orbite_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ TEXT,
+            timestamp_ DATETIME,
             phase TEXT,
             rayonnement_solaire_w_m2 REAL,
             temperature_ambiante_c REAL,
@@ -164,7 +163,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS alarmes (
             alarme_id TEXT PRIMARY KEY,
-            timestamp_ TEXT,
+            timestamp_ DATETIME,
             severite TEXT,
             message TEXT,
             acquittee INTEGER
