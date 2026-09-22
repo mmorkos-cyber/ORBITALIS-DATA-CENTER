@@ -276,4 +276,4 @@ télémétrie car beaucoup sont non renseignées et beaucoup de doublon.
 |Equipement|Sites|
 
 ## Quelles informations sont nécessaires pour analyser une dégradation de performance ?
-Télémétrie, Orbite, Alarme, Seuil_Alarme et Maintenance
+Télémétrie, Orbite, Alarme, Seuil_Alarme et Maintenance (regarder le mean- min- max -valeur abérante)
