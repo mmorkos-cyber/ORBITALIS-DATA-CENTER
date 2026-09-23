@@ -1,7 +1,19 @@
 import numpy as np
 from extract import df_alarmes, df_equipement, df_maintenance, df_orbite, df_sites, df_telemetrie, df_modeles, df_seuils_alarmes, df_references_sites
 import pandas as pd
+import json
+import os 
 
+rejets_par_source = {
+    'equipement': [],
+    'telemetrie': [],
+    'orbite': [],
+    'alarmes': [],
+    'maintenance': [],
+}
+
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+dossier_rejets = os.path.join(root, "data", "rejets")
 #Normaliser les timestamp et les les dates
 
 patterns = {
@@ -27,14 +39,31 @@ df_maintenance['date_fin'] = pd.to_datetime(df_maintenance['date_fin'], format='
 
 #Supression des doublons
 
+rejet_doublons_equipement = df_equipement[df_equipement.duplicated(keep='first')].copy()
+rejet_doublons_equipement['raison'] = 'doublon'
+rejets_par_source['equipement'].append(rejet_doublons_equipement)
+
 df_equipement.drop_duplicates(keep='first', inplace=True)
+
+rejet_doublons_telemetrie = df_telemetrie[df_telemetrie.duplicated(keep='first')].copy()
+rejet_doublons_telemetrie['raison'] = 'doublon'
+rejets_par_source['telemetrie'].append(rejet_doublons_telemetrie)
+
 df_telemetrie.drop_duplicates(keep='first', inplace=True)
 
 #Traitement des valeurs manquantes/aberrantes
 
 df_alarmes['equipement_id'] = df_alarmes['equipement_id'].fillna(df_alarmes['message'].str.extract(r'(EQ-\d+)')[0])
 
+rejet_na_equipement = df_equipement[df_equipement[['site_id', 'modele']].isna().any(axis=1)].copy()
+rejet_na_equipement['raison'] = 'site_id ou modele manquant'
+rejets_par_source['equipement'].append(rejet_na_equipement)
+
 df_equipement.dropna(subset=['site_id', 'modele'], inplace=True)
+
+rejet_na_maintenance = df_maintenance[df_maintenance[['equipement_id']].isna().any(axis=1)].copy()
+rejet_na_maintenance['raison'] = 'equipement_id manquant'
+rejets_par_source['maintenance'].append(rejet_na_maintenance)
 
 df_maintenance.dropna(subset=['equipement_id'], inplace=True)
 df_maintenance.loc[df_maintenance['commentaire'].isna(), 'commentaire'] = 'RAS'
@@ -56,7 +85,17 @@ df_references_sites.loc[df_references_sites['site_id'] == 'SITE-003', 'descripti
 
 df_references_sites.loc[df_references_sites['site_id'] == 'SITE-004', 'capacite_max_kw'] = (df_references_sites['capacite_max_kw'].mean())
 
+
+mask_aberrantes_puissance = df_telemetrie['puissance_w'].isin([1000000.0, 99999.0])
+rejet_aberrantes_puissance = df_telemetrie[mask_aberrantes_puissance].copy()
+rejet_aberrantes_puissance['raison'] = 'valeurs puissance_w aberrantes'
+rejets_par_source['telemetrie'].append(rejet_aberrantes_puissance)
 df_telemetrie['puissance_w'] = df_telemetrie['puissance_w'].replace([1000000.0, 99999.0], np.nan)
+
+mask_aberrantes_temperature = df_telemetrie['temperature_c'].isin([999.0, 450.0, 280.0, -250.0, -180.0])
+rejet_aberrantes_temperature = df_telemetrie[mask_aberrantes_temperature].copy()
+rejet_aberrantes_temperature['raison'] = 'valeurs temperature_c aberrantes'
+rejets_par_source['telemetrie'].append(rejet_aberrantes_temperature)
 df_telemetrie['temperature_c'] = df_telemetrie['temperature_c'].replace([999.0, 450.0, 280.0, -250.0, -180.0], np.nan)
 
 
@@ -100,3 +139,18 @@ df_telemetrie[cols] = df_telemetrie.groupby('equipement_id')[cols].transform(lam
 df_telemetrie[cols] = df_telemetrie.groupby('equipement_id')[cols].transform(lambda x: x.ffill().bfill())
 
 df_telemetrie = df_telemetrie.drop(columns=['site_id', 'phase'])
+
+for source, liste_rejets in rejets_par_source.items():
+    if liste_rejets:
+        df_rejets_source = pd.concat(liste_rejets, ignore_index=True)
+    else:
+        df_rejets_source = pd.DataFrame()
+
+    for col in df_rejets_source.select_dtypes(include=['datetime64']).columns:
+        df_rejets_source[col] = df_rejets_source[col].astype(str)
+
+    donnees = df_rejets_source.to_dict(orient='records')
+
+    chemin_fichier = os.path.join(dossier_rejets, f"{source}_rejets.json")
+    with open(chemin_fichier, "w") as f:
+        json.dump(donnees, f, indent=2, default=str)
