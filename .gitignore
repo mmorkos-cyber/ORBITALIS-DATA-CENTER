@@ -4,6 +4,7 @@ __pycache__/
 
 # Données générées / volumineuses
 orbitalis_data_large/
+data/
 
 # Fichiers de données
 *.csv

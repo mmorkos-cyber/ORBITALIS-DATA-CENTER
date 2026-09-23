@@ -3,7 +3,7 @@ import pandas as pd
 import sqlite3
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-dossier_data = os.path.join(root, "orbitalis_data_large")
+dossier_data = os.path.join(root, "data", "raw")
 
 fichier_data_alarmes = os.path.join(dossier_data, "alarmes.json")
 df_alarmes = pd.read_json(fichier_data_alarmes)

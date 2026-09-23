@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 import pandas as pd
 from transform import df_alarmes, df_equipement, df_maintenance, df_orbite, df_sites, df_telemetrie, df_modeles, df_seuils_alarmes, df_references_sites
+import os
 
 # ============================================================
 # CONFIGURATION
@@ -668,3 +669,15 @@ if __name__ == "__main__":
     inserer_phase_orbitale()
     inserer_mesure_telemetrie()
     inserer_alarmes()
+
+
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+dossier_raw = os.path.join(root, "data", "raw")
+dossier_traite = os.path.join(root, "data", "traite")
+
+os.makedirs(dossier_traite, exist_ok=True)
+
+for nom_fichier in os.listdir(dossier_raw):
+    chemin_source = os.path.join(dossier_raw, nom_fichier)
+    chemin_destination = os.path.join(dossier_traite, nom_fichier)
+    os.rename(chemin_source, chemin_destination)
