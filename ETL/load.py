@@ -71,7 +71,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS seuil_alarme (
             id_seuil INTEGER PRIMARY KEY AUTOINCREMENT,
-            type_alarme
+            type_alarme,
             seuil_warning REAL,
             seuil_critical REAL,
             unite TEXT,
@@ -125,7 +125,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS phase_orbitale (
             orbite_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ DATETIME,
+            timestamp DATETIME,
             phase TEXT,
             rayonnement_solaire_w_m2 REAL,
             temperature_ambiante_c REAL,
@@ -143,7 +143,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS mesure_telemetrie (
             mesure_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ TEXT,
+            timestamp DATETIME,
             puissance_w REAL,
             temperature_c REAL,
             rayonnement REAL,
@@ -163,7 +163,7 @@ def initialiser_bdd():
         curseur.execute("""
         CREATE TABLE IF NOT EXISTS alarmes (
             alarme_id TEXT PRIMARY KEY,
-            timestamp_ DATETIME,
+            timestamp DATETIME,
             severite TEXT,
             message TEXT,
             acquittee INTEGER
@@ -378,7 +378,7 @@ def inserer_equipement():
             "equipement_id",
             "date_installation",
             "statut",
-            "site_id"
+            "site_id",
             "modele_id"
             ]
         ]
@@ -476,7 +476,7 @@ def inserer_phase_orbitale():
 # Insertion des données récupérées
         df_orbite_final = orbite[
             [
-            "timestamp_",
+            "timestamp",
             "phase",
             "rayonnement_solaire_w_m2",
             "temperature_ambiante_c",
@@ -525,7 +525,7 @@ def inserer_mesure_telemetrie():
 # Insertion des données récupérées
         df_telemetrie_final = telemetrie[
             [
-            "timestamp_",
+            "timestamp",
             "puissance_w",
             "temperature_c",
             "rayonnement",
@@ -570,43 +570,62 @@ def inserer_alarmes():
     connexion = sqlite3.connect(DB_PATH)
 
     try:
-# recupération des éléments du dataframe
         alarmes = df_alarmes.copy()
 
-# On récupère id_seuil
+        # Suppression des doublons sur la clé primaire
+        alarmes.drop_duplicates(
+            subset=["alarme_id"],
+            keep="first",
+            inplace=True
+        )
+
+        # Récupération de la correspondance
+        # type_alarme -> id_seuil depuis la BDD
         df_seuils_bdd = pd.read_sql_query(
             """
             SELECT
                 id_seuil,
                 type_alarme
-            FROM seuil_alarme
+            FROM seuil_alarme;
             """,
             connexion
         )
 
+        # Jointure pour récupérer id_seuil
         alarmes = alarmes.merge(
             df_seuils_bdd,
             on="type_alarme",
-            how="left"
+            how="left",
+            validate="many_to_one"
         )
-    
-# Insertion des données récupérées
+
+        # Vérification des types non reconnus
+        alarmes_sans_seuil = alarmes[
+            alarmes["id_seuil"].isna()
+        ]
+
+        print("Alarmes sans seuil correspondant :")
+        print(
+            alarmes_sans_seuil[
+                ["alarme_id", "type_alarme"]
+            ]
+        )
+
+        # On ne garde PAS type_alarme dans la table finale
         df_alarmes_final = alarmes[
             [
-            "alarme_id",
-            "timestamp_",
-            "severite",
-            "message",
-            "acquittee",
-            "id_seuil",
-            "equipement_id"
+                "alarme_id",
+                "timestamp",
+                "severite",
+                "message",
+                "acquittee",
+                "id_seuil",
+                "equipement_id"
             ]
         ]
-# Vérification
+
         print("Données qui vont être insérées :")
         print(df_alarmes_final.head())
-
-        print(f"Nombre de ligne : {len(df_alarmes_final)}")
 
         df_alarmes_final.to_sql(
             "alarmes",
@@ -617,11 +636,17 @@ def inserer_alarmes():
 
         connexion.commit()
 
-        print(f"{len(df_alarmes_final)} lignes insérées dans la table alarme.")
+        print(
+            f"{len(df_alarmes_final)} lignes insérées "
+            "dans la table alarmes."
+        )
 
     except (sqlite3.Error, KeyError, ValueError) as erreur:
 
-        print("Erreur lors de l'insertion de la alarme :",erreur)
+        print(
+            "Erreur lors de l'insertion des alarmes :",
+            erreur
+        )
 
         connexion.rollback()
 

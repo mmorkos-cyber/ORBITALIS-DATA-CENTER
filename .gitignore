@@ -1,8 +1,10 @@
-# Compiled output
-/orbitalis_data_large
-/__pycache__
-
-*.csv
-*.db
+# Python
+__pycache__/
 *.pyc
 
+# Données générées / volumineuses
+orbitalis_data_large/
+
+# Fichiers de données
+*.csv
+*.db
