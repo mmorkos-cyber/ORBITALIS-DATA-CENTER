@@ -1,31 +1,33 @@
 # ORBITALIS-DATA-CENTER
 
-## REQUETE SQL : 
-Quelle est la production totale par équipement et par jour ?
-```SQL
-SELECT
-    equipement_id,
-    DATE(timestamp) AS jour,
-    SUM(puissance_w) AS production_totale_w
-FROM mesure_telemetrie
-GROUP BY
-    equipement_id,
-    DATE(timestamp)
-ORDER BY
-    jour,
-    equipement_id;
-```
-Quels équipements présentent les performances moyennes les plus faibles (hors périodes d’éclipse) ?
-```SQL
+## Objectif du projet
 
-```
-Combien d’alarmes chaque équipement a-t-il générées, par niveau de sévérité ?
-Quel est le délai moyen entre deux opérations de maintenance pour un même équipement ?
-Quels équipements n’ont pas été maintenus depuis plus de 90 jours ?
-Quelle est la perte de production estimée par site (en kWh) ?
-Comment évolue la performance d’un équipement au cours du temps ? (utiliser au moins une fonction de fenêtre)
-Comparer les performances pendant les phases d’ensoleillement et les phases d’éclipse sans considérer l’éclipse comme une panne.
-(Question business) Quel est le coût estimé des pertes de production non anticipées sur la période disponible ?
+Construire une chaîne de données reproductible pour analyser les performances des équipements électriques d'un datacenter en orbite basse et **anticiper une dégradation dans les 9 prochaines heures** (ou six périodes orbitales, selon le cadrage du brief).
+
+Les données sont volontairement imparfaites : il faut distinguer les anomalies de mesure, les comportements physiques normaux et les dégradations réelles. **Une puissance solaire nulle pendant une éclipse n'est pas une panne.**
+
+> **État du projet :** ETL et base relationnelle SQLite présentés ; scripts ML préparés, mais chargement analytique, construction de cible, entraînement et prédiction encore à implémenter. Les choix décrits ci-dessous constituent le plan de travail, pas des résultats de modèle déjà obtenus.
+
+## 1. Sources, ETL et exploration
+
+Sept sources brutes : `sites.csv`, `equipements.csv`, `telemetrie.csv`, `orbite.csv`, `maintenance.csv`, `alarmes.json` et `catalogue.db` (tables `modeles`, `seuils_alarmes`, `references_sites`).
+
+L'ETL est organisé en `extract.py`, `transform.py` et `load.py`. La base relationnelle créée est `orbital_data_center_clean.db` :
+
+| Table SQLite | Lignes constatées |
+|---|---:|
+| `sites` | 4 |
+| `modele` | 12 |
+| `equipement` | 64 |
+| `mesure_telemetrie` | 635 040 |
+| `phase_orbitale` | 17 280 |
+| `alarmes` | 520 |
+| `maintenance` | 96 |
+| `seuil_alarme` | 6 |
+
+La télémétrie va du **01/05/2025 00:00** au **14/06/2025 23:55** et concerne **48 équipements** sur les **64 référencés**. Les maintenances vont du **01/05/2025** au **10/06/2025**, avec **44 équipements concernés**.
+
+La télémétrie compte **12 960 timestamps distincts** (pas théorique de **5 minutes**) ; l'orbite **4 320** (pas théorique de **15 minutes**). La phase orbitale est rattachée au **site et au temps**, pas directement à la mesure. Une jointure sur l'égalité stricte des timestamps laisse beaucoup de phases non renseignées : envisager le dernier état orbital connu (`merge_asof` en arrière, avec tolérance et contrôle des cas inconnus), après vérification de la signification temporelle des relevés. Il ne faut pas utiliser une phase future pour prédire au temps `t`.
 
 
 

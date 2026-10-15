@@ -130,6 +130,42 @@ Le **Recall** quantifie les dégradations réellement détectées : les faux né
 
 Une fois les probabilités prédites sur validation, tester différents seuils et sélectionner celui dont le coût total est minimal ; appliquer ensuite ce seuil sur le jeu de test. Ce calcul tient compte du fait qu'une dégradation manquée coûte bien plus cher qu'une inspection inutile.
 
+### Préparation des données et création des features
+
+Le fichier `analyse_donnees.py` a pour objectif de préparer les données de la base analytique pour entraîner les modèles de maintenance prédictive.
+
+**Choix des features**
+
+J'ai choisi de construire plusieurs familles de variables explicatives :
+
+- **Équipements** : âge, durée de vie théorique restante et caractéristiques techniques.
+- **Télémétrie** : puissance, tension, courant, température et performance.
+- **Contexte orbital** : phases d'éclipse et d'ensoleillement, rayonnement solaire et écarts de température.
+- **Alarmes** : nombre d'alertes récentes, sévérité et temps écoulé depuis la dernière alarme.
+- **Maintenances** : nombre d'interventions précédentes, interventions correctives et temps depuis la dernière maintenance.
+
+Pour les variables évolutives, j'ai retenu des fenêtres historiques de **1h, 6h et 24h** afin d'étudier les changements rapides, les tendances intermédiaires et les évolutions plus longues.
+
+J'ai volontairement choisi un ensemble assez large de features candidates. Une **matrice de corrélation**, puis l'analyse de leur importance dans les modèles ML, permettront d'identifier les variables les plus pertinentes et de retravailler cette sélection.
+
+**Définition de la variable cible**
+
+L'objectif principal est de prédire si un équipement risque de se dégrader dans les **9 prochaines heures**.
+
+La cible `degradation_9h` sera une classification binaire fondée sur deux conditions :
+
+- Une performance moyenne hors éclipse inférieure à 0,65.
+- Ou l'apparition d'une alarme critique liée à la puissance ou à la température.
+
+Les performances observées pendant les éclipses ne seront pas automatiquement considérées comme des anomalies.
+
+**Gestion de la temporalité**
+
+Les features historiques utiliseront uniquement les informations disponibles à l'instant de prédiction. Les événements futurs serviront exclusivement à construire la variable cible.
+
+Cette séparation est indispensable pour éviter les fuites de données et garantir une évaluation réaliste des modèles.
+
+
 ## 7. Features : première sélection à confirmer
 
 Le jeu ML doit avoir **une ligne par équipement et date de décision `t`**, et non une multiplication de lignes liée à des jointures directes entre chaque mesure, chaque alarme et chaque maintenance.
@@ -149,16 +185,32 @@ Le jeu ML doit avoir **une ligne par équipement et date de décision `t`**, et 
 | Autre | `masse_kg` | Écarter au départ, réévaluer si une analyse établit son utilité |
 | Qualité de la donnée | indicateurs d'imputation et de lacunes | À créer idéalement dans l'ETL : une mesure reconstruite peut masquer un signal de défaillance |
 
-**Features historiques prioritaires (calculées uniquement à partir des temps ≤ `t`) :**
+**Features historiques candidates (calculées uniquement à partir des informations disponibles à l'instant `t`) :**
 
-- `performance_moyenne_1h`, `performance_moyenne_24h`, `variation_performance_24h` (quand la performance est correctement définie)
-- `temperature_moyenne_1h`, `temperature_max_24h`
-- `variation_tension_1h`, `variation_courant_1h`
-- `nb_alarmes_24h`, `nb_alarmes_7j`, `nb_alarmes_critiques_24h`
-- `jours_depuis_derniere_maintenance`, `nb_maintenances_precedentes`
-- `nb_mesures_manquantes_1h`, indicateurs de valeurs interpolées, si leur traçabilité est disponible
+- **Performance et production** : moyennes et écarts-types sur 1h, 6h et 24h, écarts à la moyenne récente.
+- **Température et mesures électriques** : moyennes, maximums, écarts-types et variations de la température, de la tension et du courant.
+- **Contexte orbital** : moyennes, maximums et écarts-types du rayonnement solaire et de la température ambiante sur 1h, 6h et 24h ; écart entre température de l'équipement et température ambiante.
+- **Alarmes** : nombre d'alarmes sur 1h, 6h et 24h, nombre d'alarmes `warning` et `critical`, nombre d'alarmes liées à la puissance et à la température, temps depuis la dernière alarme.
+- **Maintenance** : nombre d'interventions précédentes, maintenances des 30 derniers jours, interventions correctives et temps depuis la dernière maintenance.
+- **Vieillissement** : âge de l'équipement, durée de vie théorique restante et proportion de durée de vie utilisée.
 
-Les historiques longs (24 h, 7 j) demandent une période d'observation préalable suffisante. Exclure ou gérer les fenêtres initiales incomplètes. Toute interpolation centrée ou `bfill` utilisant des valeurs futures doit être revue pour les variables du modèle prédictif.
+Les fenêtres historiques de 1h, 6h et 24h sont des choix initiaux qui seront évalués à partir des résultats.
+
+**Méthode de sélection :**
+
+Nous conservons volontairement un ensemble large de features pour commencer. Une matrice de corrélation permettra d'étudier les relations entre les variables et d'identifier les redondances possibles.
+
+Après l'entraînement, on analysera les coefficients de la régression logistique et l'importance des features du Random Forest, idéalement complétés par une permutation importance sur le jeu de validation.
+
+Ces résultats permettront de retravailler la sélection des variables et de comparer les performances des modèles, notamment selon leur coût métier.
+
+Les variables fortement corrélées ne seront pas automatiquement supprimées.
+
+**Précautions :**
+
+Les calculs historiques ne doivent pas exploiter de données futures. Les fenêtres initiales incomplètes et les valeurs interpolées doivent être contrôlées. Les historiques d'alarmes et de maintenance devront être construits à partir des événements réels et de leurs dates.
+
+La performance utilisée pour définir la cible devra également être validée, notamment pour distinguer les comportements des panneaux solaires, des batteries et des convertisseurs DC.
 
 ## 8. Organisation du code ML
 
