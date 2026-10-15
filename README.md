@@ -257,3 +257,6 @@ jours_depuis_derniere_maintenance
 nb_maintenances_precedentes
 """
 Ces features devraient permettre de représenter la dégradation progressive des équipements.
+
+## Evaluation des modèles 
+Qu'elles features ils utilisent le plus
