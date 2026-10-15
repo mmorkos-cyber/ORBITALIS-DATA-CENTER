@@ -230,6 +230,14 @@ La performance utilisée pour définir la cible devra également être validée,
 - Choisir sur validation le modèle et le seuil minimisant le coût métier.
 - Évaluer une seule fois sur test, puis sauvegarder modèle, prétraitement, colonnes et seuil.
 
+### Découpage temporelle retenu pour train et test
+Pour notre projet Orbitalis, nous avons retenu un découpage chronologique 70 % / 15 % / 15 %, avec une marge de sécurité de 9 heures entre les périodes.
+|Ensemble|	Utilisation|
+|--------|-------------|
+|Train| 70 %	|Entraîner la régression logistique et le Random Forest|
+|Validation|  15 %|	Comparer les modèles et choisir le seuil minimisant le coût métier|
+|Test| 15 %|	Évaluer une seule fois les performances finales|
+
 ### `prediction.py`
 
 - Charger le pipeline, la liste des variables et le seuil retenu.
