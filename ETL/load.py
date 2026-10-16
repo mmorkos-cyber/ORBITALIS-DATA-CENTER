@@ -540,6 +540,9 @@ def inserer_mesure_telemetrie():
         print(df_telemetrie_final.head())
 
         print(f"Nombre de ligne : {len(df_telemetrie_final)}")
+        
+        # Supprimer les anciennes mesures avant le rechargement
+        connexion.execute("DELETE FROM mesure_telemetrie")
 
         df_telemetrie_final.to_sql(
             "mesure_telemetrie",
