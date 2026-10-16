@@ -8,6 +8,42 @@ Les données sont volontairement imparfaites : il faut distinguer les anomalies 
 
 > **État du projet :** ETL et base relationnelle SQLite présentés ; scripts ML préparés, mais chargement analytique, construction de cible, entraînement et prédiction encore à implémenter. Les choix décrits ci-dessous constituent le plan de travail, pas des résultats de modèle déjà obtenus.
 
+## Exécution
+
+Depuis la racine du projet :
+
+```bash
+pip install pandas numpy requests
+python main.py
+```
+
+`main.py` enchaîne trois étapes :
+
+| Étape | Script | Résultat |
+|---|---|---|
+| 1. Téléchargement et extraction | `dl_fichiers_raw.py` | archive dans `data/archive/`, fichiers bruts dans `data/raw/` |
+| 2. Base relationnelle | `ETL/extract.py` → `ETL/transform.py` → `ETL/load.py` | `data/propre/orbital_data_center_clean.db`, rejets dans `data/rejets/` |
+| 3. Base analytique | `pipeline_base_analytique/extract_bdd.py` → `load_base_analytique.py` | `data/propre/base_analytique.db` |
+
+**Comportement à connaître :**
+- Tous les dossiers de `data/` sont créés automatiquement.
+- L'étape 1 est ignorée si `data/raw/` contient déjà des fichiers. Si l'archive est déjà présente dans `data/archive/`, elle n'est pas retéléchargée.
+- À la fin de l'étape 2, les fichiers bruts sont **déplacés** de `data/raw/` vers `data/traite/`. À l'exécution suivante, ils sont donc réextraits depuis l'archive.
+- Les deux bases SQLite sont **supprimées puis reconstruites** à chaque exécution.
+- Si un téléchargement a été interrompu, supprimer `data/archive/orbitalis-datasets-large.zip` avant de relancer : une archive incomplète provoque une erreur `BadZipFile`.
+
+**Arborescence générée :**
+
+```
+data/
+├── archive/   # archive .zip téléchargée
+├── raw/       # fichiers bruts extraits (vidé en fin d'étape 2)
+├── traite/    # fichiers bruts archivés après traitement
+├── rejets/    # lignes écartées ou corrigées par l'ETL (JSON)
+└── propre/    # orbital_data_center_clean.db, base_analytique.db
+```
+
+
 ## 1. Sources, ETL et exploration
 
 Sept sources brutes : `sites.csv`, `equipements.csv`, `telemetrie.csv`, `orbite.csv`, `maintenance.csv`, `alarmes.json` et `catalogue.db` (tables `modeles`, `seuils_alarmes`, `references_sites`).
@@ -28,6 +64,22 @@ L'ETL est organisé en `extract.py`, `transform.py` et `load.py`. La base relati
 La télémétrie va du **01/05/2025 00:00** au **14/06/2025 23:55** et concerne **48 équipements** sur les **64 référencés**. Les maintenances vont du **01/05/2025** au **10/06/2025**, avec **44 équipements concernés**.
 
 La télémétrie compte **12 960 timestamps distincts** (pas théorique de **5 minutes**) ; l'orbite **4 320** (pas théorique de **15 minutes**). La phase orbitale est rattachée au **site et au temps**, pas directement à la mesure. Une jointure sur l'égalité stricte des timestamps laisse beaucoup de phases non renseignées : envisager le dernier état orbital connu (`merge_asof` en arrière, avec tolérance et contrôle des cas inconnus), après vérification de la signification temporelle des relevés. Il ne faut pas utiliser une phase future pour prédire au temps `t`.
+
+### Qualité des données et corrections de l'ETL
+
+| Source | Lignes brutes | Supprimées | Valeurs corrigées | Lignes en base |
+|---|---:|---:|---:|---:|
+| Équipements | 67 | 3 (1 doublon, 2 avec `site_id` ou `modele` manquant) | — | 64 |
+| Télémétrie | 635 340 | 300 doublons | 173 valeurs aberrantes (120 températures, 53 puissances) | 635 040 |
+| Maintenance | 97 | 1 (`equipement_id` manquant) | — | 96 |
+
+Les lignes brutes sont déduites (lignes en base + lignes supprimées). Les valeurs aberrantes de télémétrie ne sont pas supprimées : elles sont remplacées puis reconstruites (interpolation ou P = U × I). Le détail est tracé dans `data/rejets/`.
+
+**Référentiel des modèles incohérent.** Les identifiants de modèle des équipements (`MOD-PAN-754`, `MOD-BAT-448`…) n'existent pas dans le catalogue (`MOD-PAN-100` à `400`…). Une jointure exacte `equipement.modele_id = modele.modele_id` ne renvoie aucune ligne. Seul le préfixe (`MOD-PAN`, `MOD-BAT`, `MOD-CON`, `MOD-OND`, `MOD-RAD`) est cohérent. Choix retenus :
+- `type_equipement` et `puissance_nominale_w` proviennent directement de `equipements.csv`, qui les fournit par équipement ;
+- `rendement_nominal`, `duree_vie_annees` et `masse_kg` sont rattachés via le préfixe, en moyenne par famille de modèles. Ce sont des **approximations**.
+
+**Convention de signe.** Les puissances négatives sont conservées pour les batteries (recharge). Pour les panneaux solaires et les convertisseurs DC, elles sont traitées comme des anomalies.
 
 ### Constat sur le ratio puissance / puissance nominale
 
