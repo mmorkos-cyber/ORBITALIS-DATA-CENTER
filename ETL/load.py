@@ -1,9 +1,7 @@
-from datasets import load_dataset
 import sqlite3
 from pathlib import Path
 import pandas as pd
-from transform import df_alarmes, df_equipement, df_maintenance, df_orbite, df_sites, df_telemetrie, df_modeles, df_seuils_alarmes, df_references_sites
-import os
+from ETL.transform import df_alarmes, df_equipement, df_maintenance, df_orbite, df_sites, df_telemetrie, df_modeles, df_seuils_alarmes, df_references_sites
 
 # ============================================================
 # CONFIGURATION
@@ -16,8 +14,7 @@ DATA_CLEAN = BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db"
 # CONNEXION SQLITE
 # ============================================================
 
-connexion = sqlite3.connect(DATA_CLEAN)
-curseur = connexion.cursor()
+
 
 # ============================================================
 # CRÉATION DES TABLES
@@ -548,7 +545,8 @@ def inserer_mesure_telemetrie():
             "mesure_telemetrie",
             connexion,
             if_exists="append",
-            index=False
+            index=False,
+            chunksize=50_000
         )
 
         connexion.commit()
@@ -661,9 +659,20 @@ def inserer_alarmes():
 # ============================================================
 # EXECUTION
 # ============================================================
-if __name__ == "__main__":
-    initialiser_bdd()
+def archiver_fichiers_raw():
+    dossier_raw = BASE_DIR / "data" / "raw"
+    dossier_traite = BASE_DIR / "data" / "traite"
+    dossier_traite.mkdir(parents=True, exist_ok=True)
 
+    for fichier in dossier_raw.iterdir():
+        fichier.replace(dossier_traite / fichier.name)
+
+
+def run():
+    DATA_CLEAN.parent.mkdir(parents=True, exist_ok=True)
+    DATA_CLEAN.unlink(missing_ok=True)
+
+    initialiser_bdd()
     inserer_sites()
     inserer_modele()
     inserer_seuil_alarme()
@@ -673,14 +682,8 @@ if __name__ == "__main__":
     inserer_mesure_telemetrie()
     inserer_alarmes()
 
+    archiver_fichiers_raw()
 
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-dossier_raw = os.path.join(root, "data", "raw")
-dossier_traite = os.path.join(root, "data", "traite")
 
-os.makedirs(dossier_traite, exist_ok=True)
-
-for nom_fichier in os.listdir(dossier_raw):
-    chemin_source = os.path.join(dossier_raw, nom_fichier)
-    chemin_destination = os.path.join(dossier_traite, nom_fichier)
-    os.rename(chemin_source, chemin_destination)
+if __name__ == "__main__":
+    run()
