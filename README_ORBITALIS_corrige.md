@@ -266,54 +266,219 @@ La performance utilisée pour définir la cible devra également être validée,
 
 ## 8. Organisation du code ML
 
-### `analyse_donnees.py`
+Le module `ML/` d'Orbitalis a pour objectif de développer un système de maintenance prédictive capable d'estimer le risque de dégradation d'un équipement dans les **9 prochaines heures**.
 
-- Charger la base analytique (**connexion à compléter**).
-- Vérifier le grain et les colonnes réellement disponibles ; harmoniser `date_`, `minute_`, les ID et les noms de colonnes.
-- Rapprocher les sources sans dupliquer artificiellement les observations.
-- Construire les features disponibles à `t` et la cible `risque_degradation_9h` à partir de la période suivante.
-- Réaliser les analyses exploratoires, la vérification de l'équilibre des classes et la matrice de corrélation.
+Le pipeline est organisé en trois étapes :
 
-### `entrainement.py`
+1. **Préparation des données** avec `analyse_donnees.py`.
+2. **Entraînement et évaluation des modèles** avec `entrainement.py`.
+3. **Prédiction sur de nouvelles observations** avec `prediction.py` (à développer).
 
-- Définir `X` et `y` ; découper chronologiquement train / validation / test.
-- Entraîner baseline, régression logistique et Random Forest avec prétraitements adaptés.
-- Calculer métriques et matrices de confusion.
-- Choisir sur validation le modèle et le seuil minimisant le coût métier.
-- Évaluer une seule fois sur test, puis sauvegarder modèle, prétraitement, colonnes et seuil.
+### `analyse_donnees.py` — Préparation du dataset ML
 
+Ce script exploite les données issues de deux bases SQLite :
+
+- `base_analytique.db` : mesures de production, performances, caractéristiques des équipements et informations orbitales.
+- `orbital_data_center_clean.db` : historiques des alarmes et des maintenances.
+
+#### Chargement et contrôle des données
+
+Le programme réalise les opérations suivantes :
+
+- Chargement et rapprochement des tables analytiques.
+- Harmonisation des dates, des identifiants et des variables.
+- Contrôle des doublons par équipement et horodatage.
+- Vérification des types de données et traitement des valeurs manquantes.
+- Tri chronologique des observations pour chaque équipement.
+
+#### Construction des variables explicatives (features)
+
+Les variables sont construites à partir des informations disponibles au moment de la prédiction.
+
+Elles comprennent notamment :
+
+- **Caractéristiques des équipements** : type, puissance nominale, rendement nominal, ancienneté et caractéristiques techniques.
+- **Télémétrie** : puissance, température, tension, courant et rayonnement.
+- **Historique de télémétrie** : indicateurs glissants calculés sur différentes fenêtres temporelles (1 h, 6 h et 24 h).
+- **Contexte orbital** : phase d'ensoleillement ou d'éclipse et conditions environnementales.
+- **Historique des alarmes** : événements antérieurs et indicateurs associés.
+- **Historique des maintenances** : interventions passées et informations disponibles avant l'observation courante.
+- **Indicateurs de performance** : références historiques et seuils personnalisés.
+
+#### Définition de la dégradation
+
+La cible `degradation_9h` indique si une dégradation est identifiée pendant les neuf heures suivant une observation.
+
+Trois valeurs sont possibles :
+
+| Valeur | Signification |
+|---|---|
+| `0` | Aucune dégradation identifiée dans les 9 heures futures |
+| `1` | Dégradation identifiée dans les 9 heures futures |
+| `NaN` | Informations insuffisantes pour attribuer une cible fiable |
+
+**Pour les panneaux solaires et les convertisseurs DC**, la dégradation peut être détectée par une sous-performance ou par une alarme critique.
+
+La sous-performance repose sur la comparaison entre la performance moyenne des neuf heures futures, calculée uniquement sur les périodes d'ensoleillement, et un seuil propre à chaque équipement.
+
+**Pour les batteries**, la puissance peut être négative pendant la recharge. Elle ne constitue donc pas, à elle seule, un signe de dégradation. Leur cible repose actuellement sur la présence d'alarmes critiques.
+
+Les alarmes prises en compte correspondent aux types `perte_puissance`, `surcharge` et `surchauffe`, avec une sévérité `critical`.
+
+Cette cible est une **définition opérationnelle et exploratoire de la dégradation**, et non une identification certaine d'une panne physique.
+
+#### Calcul des seuils personnalisés
+
+L'utilisation d'un seuil de performance fixe pour tous les équipements a été abandonnée, car les niveaux de fonctionnement varient fortement d'un équipement à l'autre.
+
+Deux seuils complémentaires sont désormais calculés.
+
+**1. Seuil glissant**
+
+Une référence de performance est calculée pour chaque équipement à partir des sept jours précédents, uniquement hors éclipse.
+
+Le seuil glissant correspond à :
+
+`seuil_glissant = performance_reference × 0.80`
+
+Il permet de détecter une baisse significative par rapport au comportement récent de l'équipement.
+
+**2. Seuil plancher**
+
+Un second seuil empêche que la diminution progressive de la référence glissante rende les dégradations de moins en moins détectables.
+
+La référence initiale est estimée à partir des 24 premières mesures valides hors éclipse.
+
+`seuil_plancher = performance_initiale × 0.60`
+
+**3. Seuil final**
+
+Le seuil utilisé pour construire la cible est le plus élevé des deux :
+
+`seuil_degradation = max(seuil_glissant, seuil_plancher)`
+
+Cette méthode permet d'adapter la détection à chaque équipement tout en conservant une limite minimale.
+
+Les coefficients de 80 % et 60 % sont des **hypothèses de travail** qui devront être validées sur des critères métier.
+
+#### Vérification des neuf heures futures
+
+Pour attribuer une cible, le programme contrôle notamment :
+
+- La disponibilité d'une fenêtre future complète de 9 heures.
+- La présence d'au moins 98 mesures parmi les 108 théoriquement attendues.
+- Pour l'évaluation de la performance, la disponibilité d'au moins 20 mesures valides hors éclipse.
+- La présence éventuelle d'une alarme critique dans cette fenêtre.
+
+Les observations dont la cible ne peut pas être déterminée sont conservées avec la valeur `NaN`, puis exclues de l'entraînement.
+
+#### Dataset généré
+
+Le script dispose de deux modes d'exécution :
+
+- **Mode test** : traitement d'un échantillon limité à trois équipements sur 45 jours.
+- **Mode complet** : préparation du dataset pour les 48 équipements.
+
+Les fichiers Parquet sont enregistrés dans `data/propre/ml/` :
+
+- `orbitalis_ml_test.parquet`
+- `orbitalis_ml_complet.parquet`
+
+**Résultats du dernier traitement complet :**
+
+| Indicateur | Résultat |
+|---|---:|
+| Mesures initialement chargées | 635 040 |
+| Observations conservées | 622 080 |
+| Équipements | 48 |
+| Colonnes du dataset préparé | 124 |
+| Cibles normales (`0`) | 514 094 |
+| Cibles dégradées (`1`) | 101 643 |
+| Cibles inconnues (`NaN`) | 6 343 |
+| Taux de dégradation parmi les cibles connues | 16,51 % |
+
+Le contrôle a également identifié 12 960 lignes écartées lors de la déduplication par équipement et horodatage. Ce point est conservé comme une limite de qualité des données dans la version actuelle.
+
+---
+
+### `entrainement.py` — Entraînement et sélection du modèle
+
+Ce script utilise le fichier `orbitalis_ml_complet.parquet` pour entraîner des modèles de classification binaire.
+
+#### Préparation de `X` et `y`
+
+- Suppression des observations dont `degradation_9h` est inconnue.
+- Séparation des variables explicatives (`X`) et de la cible (`y`).
+- Exclusion des identifiants et des colonnes contenant des informations futures, notamment `performance_moyenne_future_9h`.
+- Gestion des valeurs manquantes par imputation.
+- Encodage des variables catégorielles.
+- Standardisation des variables numériques pour la régression logistique.
+
+Les transformations sont intégrées à des pipelines `scikit-learn`, ajustés uniquement sur le jeu d'entraînement.
+
+Le dernier entraînement a utilisé **615 737 observations avec une cible connue et 112 variables explicatives**.
 
 ### Découpage des données : Train / Validation / Test
 
-Pour entraîner et évaluer les modèles de maintenance prédictive, on a choisi un **découpage chronologique des données en trois ensembles** :
+Le dataset est divisé chronologiquement selon les proportions suivantes :
 
 - **70 % — Train** : entraînement de la régression logistique et du Random Forest.
-- **15 % — Validation** : comparaison des modèles et optimisation du seuil de prédiction selon les coûts métier.
-- **15 % — Test** : évaluation finale du modèle retenu sur des données jamais utilisées pour l'entraînement ou la sélection.
+- **15 % — Validation** : comparaison des modèles et optimisation de leur seuil de décision.
+- **15 % — Test** : évaluation finale sur une période ultérieure, non utilisée pour entraîner ou sélectionner le modèle.
 
-Contrairement à un découpage aléatoire, cette méthode respecte l'ordre temporel des observations afin de reproduire une situation réelle : **apprendre sur le passé pour prédire le futur**.
+Les limites sont calculées à partir des dates distinctes.
 
-Une **marge de sécurité de 9 heures** est appliquée avant les frontières entre les ensembles. Elle évite que les données futures utilisées pour construire la cible `degradation_9h` empiètent sur la période suivante.
+Une **marge de sécurité de 9 heures** est appliquée avant les frontières train/validation et validation/test afin que la fenêtre future utilisée pour créer une cible ne chevauche pas la période suivante.
 
-Les proportions sont calculées à partir des dates distinctes. Les observations situées dans les marges de sécurité sont exclues du découpage.
+Le découpage respecte ainsi le principe : **apprendre sur le passé pour prédire le futur**.
 
+**Répartition obtenue lors du dernier entraînement :**
+
+| Ensemble | Observations | Dégradations |
+|---|---:|---:|
+| Train | 425 465 | 38 355 |
+| Validation | 87 360 | 26 164 |
+| Test | 92 544 | 33 991 |
+
+Les différences de fréquence des dégradations entre ces périodes permettent également d'observer l'évolution du comportement des équipements dans le temps.
+
+### Modèles comparés
+
+Trois approches sont mises en concurrence.
+
+**1. Baseline naïve**
+
+Cette approche applique une règle simple basée sur les observations actuelles :
+
+- Pour les panneaux solaires et convertisseurs DC, elle prédit une dégradation lorsque la performance actuelle hors éclipse est inférieure au seuil personnalisé.
+- Pour les batteries et les autres équipements, elle prédit par défaut l'absence de dégradation.
+
+Elle constitue un point de comparaison pour mesurer l'intérêt des modèles supervisés.
+
+**2. Régression logistique**
+
+Modèle de classification permettant d'estimer une probabilité de dégradation. Les variables numériques sont standardisées et les variables catégorielles encodées.
+
+**3. Random Forest**
+
+Ensemble d'arbres de décision permettant de modéliser des relations non linéaires entre les caractéristiques des équipements, les conditions orbitales et les historiques de fonctionnement.
+
+Pour limiter les ressources nécessaires, la première version utilise notamment 50 arbres et une profondeur maximale de 10.
 
 ### Évaluation et comparaison des modèles
 
-Pour évaluer les performances du système de maintenance prédictive, on a choisi de comparer trois approches : une **baseline naïve**, une **régression logistique** et un **Random Forest**.
-
-L'évaluation repose sur plusieurs indicateurs :
+Les modèles sont évalués à partir des indicateurs suivants :
 
 - **Accuracy** : proportion de prédictions correctes.
-- **Précision** : proportion de dégradations réellement observées parmi celles prédites.
-- **Recall (rappel)** : capacité du modèle à détecter les dégradations réelles.
-- **F1-score** : compromis entre précision et rappel.
-- **Matrice de confusion** : répartition des vrais positifs, faux positifs, vrais négatifs et faux négatifs.
-- **Average Precision (AP)** : mesure de la capacité du modèle à classer les équipements selon leur risque de dégradation.
+- **Précision** : proportion de dégradations réelles parmi les prédictions positives.
+- **Recall (rappel)** : proportion de dégradations effectivement détectées.
+- **F1-score** : équilibre entre précision et rappel.
+- **Matrice de confusion** : vrais positifs, faux positifs, vrais négatifs et faux négatifs.
+- **Average Precision (AP)** : synthèse de la courbe précision-rappel calculée à partir des probabilités.
 
-**Prise en compte des coûts métier**
+#### Prise en compte des coûts métier
 
-Au-delà des métriques classiques, on a choisi d'intégrer les coûts définis dans le brief :
+Les coûts utilisés dans le modèle sont les suivants :
 
 | Résultat | Coût |
 |---|---:|
@@ -322,17 +487,86 @@ Au-delà des métriques classiques, on a choisi d'intégrer les coûts définis 
 | Faux négatif (FN) | 2 500 € |
 | Vrai négatif (TN) | 0 € |
 
-L'objectif est de **minimiser le coût métier**, notamment en limitant les dégradations non détectées, particulièrement coûteuses.
+Le coût total est calculé selon la formule :
 
-Les modèles seront d'abord comparés sur le jeu de validation. Le seuil de décision sera optimisé sur ce même ensemble, puis le modèle retenu sera évalué une seule fois sur le jeu de test.
+`coût_total = TP × 300 + FP × 150 + FN × 2500`
 
-Cette démarche permet de sélectionner un modèle selon sa fiabilité, mais également selon les conséquences économiques de ses prédictions.
+Un faux négatif représente une dégradation non détectée et entraîne le coût le plus élevé.
 
-### `prediction.py`
+Les probabilités des modèles sont converties en décisions binaires grâce à un seuil de décision. Ce seuil est optimisé sur le jeu de validation afin de minimiser le coût métier.
 
-- Charger le pipeline, la liste des variables et le seuil retenu.
-- Préparer une nouvelle observation avec **le même schéma de features** et uniquement des données connues au temps de prédiction.
-- Fournir la probabilité de dégradation à 9 heures et la décision d'inspection associée.
+Le modèle retenu est celui qui obtient le coût le plus faible sur la validation.
 
+#### Résultats sur le jeu de validation
 
-**Principe directeur :** l'objectif n'est pas de prédire davantage de maintenances planifiées, mais d'**anticiper des dégradations réelles** en minimisant le coût des mauvaises décisions, sans confondre éclipse, charge partielle et panne.
+| Indicateur | Baseline naïve | Régression logistique | Random Forest |
+|---|---:|---:|---:|
+| Accuracy | 85,7 % | 91,3 % | **98,1 %** |
+| Précision | 91,4 % | 79,6 % | **99,2 %** |
+| Recall | 57,9 % | **95,7 %** | 94,5 % |
+| F1-score | 70,9 % | 86,9 % | **96,8 %** |
+| Coût métier | 32,32 M€ | 11,31 M€ | **11,07 M€** |
+| Seuil optimisé | — | 0,10 | 0,30 |
+
+Le **Random Forest** présente le coût métier le plus faible sur le jeu de validation et est donc sélectionné pour l'évaluation finale.
+
+#### Résultats sur le jeu de test
+
+Le Random Forest est ensuite évalué sur les données de test, sans modifier son seuil de décision de `0.30`.
+
+| Indicateur | Résultat |
+|---|---:|
+| Accuracy | 91,4 % |
+| Précision | 91,0 % |
+| Recall | 85,0 % |
+| F1-score | 87,9 % |
+| Average Precision | 0,953 |
+| Vrais positifs | 28 901 |
+| Faux positifs | 2 846 |
+| Faux négatifs | 5 090 |
+| Vrais négatifs | 55 707 |
+| Coût métier | 21 822 200 € |
+
+La diminution des performances entre validation et test montre que le modèle reste sensible à l'évolution temporelle des données, notamment lorsque la proportion de dégradations augmente.
+
+Le Random Forest est donc retenu comme **meilleur modèle de cette première expérimentation**, sans considérer qu'il est déjà validé pour un usage opérationnel.
+
+### Sauvegarde du modèle
+
+Une fonction `sauvegarder_modele()` permet d'enregistrer le modèle sélectionné après son évaluation.
+
+Le dossier de sortie est :
+
+`data/propre/ml/modeles/`
+
+Deux fichiers sont prévus :
+
+- `modele_degradation.joblib` : pipeline complet `scikit-learn`, comprenant le prétraitement, le modèle entraîné et le seuil de décision.
+- `modele_degradation.json` : métadonnées de l'entraînement, nom du modèle, date, horizon de prédiction, seuil et métriques obtenues.
+
+Cette sauvegarde permet de réutiliser le modèle sans relancer son entraînement. Elle doit être vérifiée par un test de rechargement et de prédiction.
+
+---
+
+### `prediction.py` — Utilisation du modèle (à développer)
+
+Le futur script de prédiction devra :
+
+- Charger le pipeline entraîné et son seuil de décision.
+- Reconstituer les variables nécessaires à partir des données disponibles à l'instant de prédiction.
+- Respecter le même schéma de features que pendant l'entraînement.
+- Fournir une probabilité de dégradation dans les neuf prochaines heures.
+- Produire une décision d'alerte ou d'inspection en fonction du seuil retenu.
+
+### Limites et points de vigilance
+
+Cette première version du système comporte plusieurs limites identifiées :
+
+- **Cible construite à partir de règles** : elle représente une sous-performance future ou certaines alarmes critiques, et non une panne matériellement confirmée.
+- **Seuils expérimentaux** : les coefficients 80 % et 60 %, ainsi que le minimum de 20 mesures ensoleillées, nécessitent une validation métier.
+- **Qualité des données** : 12 960 lignes ont été écartées lors de la déduplication et les données sont synthétiques.
+- **Risque de fuite temporelle** : certaines interpolations et méthodes de remplissage réalisées dans l'ETL peuvent exploiter des observations futures. Elles devront être rendues strictement causales avant une validation fiable.
+- **Évolution des performances** : le recul constaté entre validation et test montre l'importance de vérifier la robustesse du modèle dans le temps.
+- **Interprétation économique** : les coûts sont calculés par observation de cinq minutes. Plusieurs observations pouvant concerner un même épisode de dégradation, les sommes obtenues servent principalement à comparer les modèles et ne représentent pas nécessairement des coûts réels de maintenance.
+
+**Principe directeur :** l'objectif d'Orbitalis est d'anticiper les situations de sous-performance et les événements critiques en minimisant le coût des mauvaises décisions, sans confondre éclipse, recharge de batterie, fonctionnement à charge partielle et panne réelle.
