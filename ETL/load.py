@@ -9,14 +9,14 @@ import os
 # CONFIGURATION
 # ============================================================
 
-DOSSIER_SCRIPT = Path(__file__).resolve().parent
-DB_PATH = DOSSIER_SCRIPT / "orbital_data_center_clean.db"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_CLEAN = BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db"
 
 # ============================================================
 # CONNEXION SQLITE
 # ============================================================
 
-connexion = sqlite3.connect(DB_PATH)
+connexion = sqlite3.connect(DATA_CLEAN)
 curseur = connexion.cursor()
 
 # ============================================================
@@ -24,7 +24,7 @@ curseur = connexion.cursor()
 # ============================================================
 
 def initialiser_bdd():
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
     
     try:
         curseur = connexion.cursor()
@@ -201,7 +201,7 @@ def initialiser_bdd():
 # ============================================================
 def inserer_sites():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -261,7 +261,7 @@ def inserer_sites():
 # ============================================================
 def inserer_modele():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -312,7 +312,7 @@ def inserer_modele():
 
 def inserer_seuil_alarme():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -361,7 +361,7 @@ def inserer_seuil_alarme():
 
 def inserer_equipement():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -416,7 +416,7 @@ def inserer_equipement():
 
 def inserer_maintenance():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -468,7 +468,7 @@ def inserer_maintenance():
 
 def inserer_phase_orbitale():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -517,7 +517,7 @@ def inserer_phase_orbitale():
 
 def inserer_mesure_telemetrie():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
 # recupération des éléments du dataframe
@@ -568,7 +568,7 @@ def inserer_mesure_telemetrie():
 
 def inserer_alarmes():
 
-    connexion = sqlite3.connect(DB_PATH)
+    connexion = sqlite3.connect(DATA_CLEAN)
 
     try:
         alarmes = df_alarmes.copy()

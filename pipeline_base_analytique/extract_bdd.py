@@ -1,98 +1,49 @@
-import os
 import sqlite3
+from pathlib import Path
 import pandas as pd
 
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-fichier_bdd = os.path.join(root, "ETL", "orbital_data_center_clean.db")
+BASE_DIR = Path(__file__).resolve().parent.parent
+SOURCE_DB = BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db"
 
-conn = sqlite3.connect(fichier_bdd)
 
-query_site = """
-    SELECT
-        si.site_id,
-        si.nom,
-        si.orbite_type,
-        si.altitude_km,
-        si.inclination_deg,
-        si.date_mise_en_service,
-        si.statut,
-        si.description,
-        si.capacite_max_kw,
-        si.zone_orbitale
-    FROM sites si
-"""
+def get_connexion():
+    return sqlite3.connect(SOURCE_DB)
 
-df_dim_site = pd.read_sql_query(query_site, conn)
 
-query_alarme = """
-    SELECT
-        sa.id_seuil,
-        sa.type_alarme,
-        sa.seuil_warning,
-        sa.seuil_critical,
-        sa.unite,
-        sa.description
-    FROM seuil_alarme sa
-"""
+def prepa_dim_orbite(conn):
+    return pd.read_sql_query("""
+        SELECT orbite_id AS id_orbite, phase,
+               rayonnement_solaire_w_m2, temperature_ambiante_c
+        FROM phase_orbitale
+    """, conn)
 
-df_dim_alarme = pd.read_sql_query(query_alarme, conn)
+def prepa_dim_maintenance(conn):
+    return pd.read_sql_query("""
+        SELECT maintenance_id AS id_maintenance, date_debut, date_fin,
+               type_intervention, cout_eur
+        FROM maintenance
+    """, conn)
 
-query_equipement = """
-    SELECT
-        e.equipement_id,
-        e.statut,
-        e.date_installation,
-    FROM equipement e
-"""
+def prepa_dim_alarme(conn):
+    return pd.read_sql_query("""
+        SELECT a.alarme_id AS id_alarme, a.timestamp AS date_alarme,
+               a.severite, a.acquittee,
+               sa.type_alarme, sa.seuil_warning, sa.seuil_critical, sa.unite
+        FROM alarmes a
+        JOIN seuil_alarme sa ON a.id_seuil = sa.id_seuil
+    """, conn)
 
-df_dim_equipement = pd.read_sql_query(query_equipement, conn)
+def prepa_dim_equipement(conn):
+    return pd.read_sql_query("""
+        SELECT e.equipement_id AS id_equipement, m.type_equipement, e.statut,
+               e.date_installation, m.puissance_nominale_w, m.rendement_nominal,
+               m.duree_vie_annees, m.masse_kg, s.altitude_km
+        FROM equipement e
+        JOIN modele m ON e.modele_id = m.modele_id
+        JOIN sites s  ON e.site_id = s.site_id
+    """, conn)
 
-query_modele = """
-    SELECT
-        mo.modele_id,
-        mo.type_equipement,
-        mo.rendement_nominal,
-        mo.duree_vie_annees,
-        mo.masse_kg
-    FROM modele mo
-"""
-
-df_dim_modele = pd.read_sql_query(query_modele, conn)
-
-query_temps = """
-    SELECT
-        me.timestamp
-    FROM mesure_telemetrie me
-"""
-
-df_dim_temps = pd.read_sql_query(query_temps, conn)
-
-query_telemetrie = """
-    SELECT
-        mt.timestamp,
-        mt.equipement_id,
-        e.site_id,
-        mt.puissance_w,
-        mt.temperature_c,
-        mt.rayonnement,
-        mt.tension_v,
-        mt.courant_a,
-        mo.puissance_nominale_w,
-        mo.rendement_nominal,
-        po.phase,
-        po.rayonnement_solaire_w_m2,
-        po.temperature_ambiante_c,
-        ma.maintenance_id,
-        a.severite
-    FROM mesure_telemetrie mt
-    JOIN equipement e ON mt.equipement_id = e.equipement_id
-    JOIN sites si ON si.site_id = e.site_id
-    JOIN phase_orbitale po ON si.site_id = po.site_id
-    JOIN modele mo ON e.modele_id = mo.modele_id
-    JOIN maintenance ma ON  e.equipement_id = ma.equipement_id
-    JOIN alarmes a ON e.equipement_id = a.equipement_id
-"""
-
-df_fait_telemetrie = pd.read_sql_query(query_telemetrie, conn)
-
-conn.close()
+def prepa_dim_temps(conn):
+    return pd.read_sql_query(
+        "SELECT DISTINCT timestamp FROM mesure_telemetrie",
+        conn, parse_dates=["timestamp"])
