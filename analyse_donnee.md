@@ -38,6 +38,63 @@ UNION ALL SELECT 'seuil_alarme', COUNT(*) FROM seuil_alarme;
 
 **Relations importantes :** une mesure est rattachée à un équipement, lui-même rattaché à un site et à un modèle. Une phase orbitale dépend d'un site et d'un instant. Les alarmes et interventions de maintenance sont rattachées à un équipement. Pour rapprocher télémétrie et orbite, il faut combiner `site_id` et une règle de correspondance temporelle.
 
+### 1.2 Nettoyage et corrections de l'ETL
+
+Les lignes écartées ou corrigées sont tracées dans `data/rejets/`, avec un fichier par source et une colonne `raison`.
+
+##### Synthèse
+
+| Source | Lignes brutes | Supprimées | Valeurs corrigées (lignes conservées) | Lignes en base |
+|---|---:|---:|---:|---:|
+| Équipements | 67 | 3 | — | 64 |
+| Télémétrie | 635 340 | 300 | 173 | 635 040 |
+| Maintenance | 97 | 1 | — | 96 |
+| Orbite | 17 280 | 0 | interpolation des températures | 17 280 |
+| Alarmes | 520 | 0 | `equipement_id` reconstitué | 520 |
+
+Les lignes brutes sont déduites : lignes en base + lignes supprimées.
+
+##### Équipements (3 lignes supprimées)
+
+| Équipement | Motif | Anomalies observées |
+|---|---|---|
+| `EQ-006` (2e occurrence) | doublon exact | — |
+| `EQ-999` | `site_id` manquant | date au format `15/03/2024`, modèle `MOD-PAN-999` |
+| `EQ-998` | `modele` manquant | `site_id = SITE-XXX`, type `inconnu`, puissance nominale −500 W, date `2025-99-99`, statut `???` |
+
+`EQ-999` et `EQ-998` ressemblent à des lignes de test injectées volontairement.
+
+##### Télémétrie (300 supprimées, 173 corrigées)
+
+| Motif | Lignes | Traitement |
+|---|---:|---|
+| doublon exact | 300 | supprimées |
+| `temperature_c` aberrante (999, 450, 280, −250, −180 °C) | 120 | valeur remplacée par `NaN`, puis interpolée par équipement |
+| `puissance_w` aberrante (1 000 000 ou 99 999 W) | 53 | valeur remplacée par `NaN`, puis reconstruite (P = U × I ou interpolation) |
+
+**Attention :** les 173 lignes aberrantes ne sont **pas supprimées**. Elles restent en base avec une valeur reconstruite. Une même mesure peut figurer dans les deux catégories si sa puissance et sa température sont aberrantes ; le nombre de mesures distinctes concernées est donc au plus 173.
+
+##### Maintenance (1 ligne supprimée)
+
+`MAINT-000` : `equipement_id` manquant. La ligne cumulait d'autres incohérences : date de fin (28/04/2025) antérieure à la date de début (01/05/2025), type `???`, technicien manquant, coût 0 €, commentaire « Données incohérentes ».
+
+##### Orbite et alarmes (aucune suppression)
+
+- **Orbite :** les températures ambiantes manquantes sont interpolées linéairement par site.
+- **Alarmes :** les `equipement_id` manquants sont reconstitués à partir du message (motif `EQ-xxx`). `ALM-0031` a un type `UNKNOWN_TYPE`, sans seuil correspondant : son `id_seuil` vaut `NULL`.
+
+##### Défaut corrigé dans `transform.py`
+
+Le type d'équipement des mesures était récupéré par jointure exacte avec le catalogue (cf. 1 bis). Il était donc vide pour toutes les mesures, et les traitements dépendant du type **ne s'appliquaient pas** :
+- mise à `NaN` des puissances négatives des panneaux solaires et convertisseurs DC ;
+- mise à 0 des puissances manquantes des panneaux en éclipse ;
+- mise en cohérence électrique des batteries (le contrôle affichait `Batteries corrigées : 0`).
+
+La correction utilise la colonne `type` de `equipements.csv`. **Les statistiques calculées avant cette correction doivent être recalculées.**
+
+**Convention de signe :** les puissances négatives sont conservées pour les batteries (recharge). Pour les panneaux solaires et les convertisseurs DC, elles sont considérées comme anormales.
+
+
 ## 2. Exploration d'un échantillon d'équipements
 
 Une première jointure entre télémétrie, équipements, modèles et orbite a permis d'observer notamment :
@@ -274,6 +331,37 @@ Sur 45 jours : `45 × 24 × 12 = 12 960` timestamps de télémétrie et `45 × 2
 Une jointure `t.timestamp = o.timestamp` ne trouve un relevé orbital que pour un timestamp de télémétrie sur trois, d'où les `NULL` observés. De plus, la phase `inconnu` existe réellement et doit être distinguée de l'absence de correspondance.
 
 **Règle de rapprochement candidate :** rattacher les mesures d'un site à la dernière phase orbitale connue (par exemple 10h05 et 10h10 associés au relevé orbital de 10h00), avec une tolérance temporelle explicite. Une jointure de type `merge_asof(..., direction="backward", by="site_id")` est envisageable, **à condition de confirmer** qu'un relevé orbital est valable jusqu'au suivant. Cela évite d'associer la télémétrie à une observation future, contrairement à certains arrondis à la quinzaine de minutes la plus proche.
+
+**Règle retenue : rattachement au créneau de 15 minutes inférieur.** Chaque mesure est associée au relevé orbital du début de son créneau (10h05 et 10h10 → 10h00). En SQLite :
+
+```sql
+o.timestamp = datetime(
+    (CAST(strftime('%s', t.timestamp) AS INTEGER) / 900) * 900,
+    'unixepoch'
+)
+```
+
+**Justification observée :** sur `SITE-001`, l'éclipse commence à 01:15. `EQ-001` produit encore 402 W à 01:10, puis 0 W à 01:15. Un arrondi au plus proche aurait rattaché 01:10 à l'éclipse, ce qui serait incohérent avec la production mesurée. Ce constat porte sur un exemple et reste à confirmer sur l'ensemble des sites.
+
+### 8.2 Base analytique (`base_analytique.db`)
+
+Modèle en étoile :
+- **dimensions** : `dim_equipement`, `dim_temps`, `dim_orbite`, `dim_alarme`, `dim_maintenance` ;
+- **table de faits** : `fait_production`, au grain d'une mesure toutes les 5 minutes.
+
+Indicateurs calculés dans `fait_production` :
+- `performance = puissance_w / NULLIF(puissance_nominale_w, 0)`. Le `NULLIF` évite la division par zéro, notamment pour les radiateurs. Il s'agit d'un rapport à la capacité nominale (cf. réserve de la section 6), pas encore d'une performance par rapport à une puissance attendue.
+- `perte_production_w` : baisse de puissance par rapport à la mesure précédente du même équipement (`LAG`), bornée à 0.
+- `perte_energie_kwh = perte_production_w × 5 / 60 / 1000`.
+
+Contrôles à exécuter après chaque chargement :
+
+```sql
+SELECT COUNT(*) FROM fait_production;                                    -- attendu : proche de 635 040
+SELECT COUNT(*) FROM fait_production WHERE id_orbite IS NULL;            -- attendu : 0 ou proche
+SELECT COUNT(*) FROM fait_production WHERE puissance_nominale_w IS NULL; -- attendu : 0
+```
+
 
 ## 9. Implications pour la maintenance prédictive
 
