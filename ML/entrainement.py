@@ -4,11 +4,21 @@
 # =====================================================
 from pathlib import Path
 import pandas as pd
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import classification_report
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    average_precision_score
+)
 
 
 # =====================================================
@@ -224,25 +234,123 @@ def creer_preprocesseur(X, standardiser=True):
     return preprocesseur
 
 # =====================================================
-# 8. ENTRAINEMENT DES MODELES
+# 8. ENTRAINEMENT REGRESSION LOGISTIQUE
+# =====================================================
+
+# Entraîne une régression logistique pour prédire
+# une dégradation de l'équipement dans les 9 prochaines heures.
+
+def entrainer_regression_logistique(X_train, y_train):
+
+    # Préparer les variables pour la régression logistique
+    preprocesseur = creer_preprocesseur(X_train, standardiser=True)
+
+    # Créer le modèle
+    modele = LogisticRegression(
+        max_iter=500,
+        solver="lbfgs",
+        random_state=42
+    )
+
+    # Associer le prétraitement et le modèle
+    pipeline = Pipeline([
+        ("preprocesseur", preprocesseur),
+        ("modele", modele)
+    ])
+
+    # Entraîner sur les données d'entraînement
+    pipeline.fit(X_train, y_train)
+
+    print("Régression logistique entraînée.")
+
+    return pipeline
+
+# =====================================================
+# 9. ENTRAINEMENT DU RANDOM FOREST
+# =====================================================
+
+# Entraîne un Random Forest pour prédire une dégradation
+# dans les 9 prochaines heures, avec des paramètres
+# limitant le temps de calcul et la consommation mémoire.
+
+def entrainer_random_forest(X_train, y_train):
+
+    # Préparer les variables sans standardisation
+    preprocesseur = creer_preprocesseur(X_train, standardiser=False)
+
+    # Créer le modèle
+    modele = RandomForestClassifier(
+        n_estimators=50,
+        max_depth=10,
+        min_samples_leaf=5,
+        n_jobs=2,
+        random_state=42
+    )
+
+    # Associer le prétraitement et le modèle
+    pipeline = Pipeline([
+        ("preprocesseur", preprocesseur),
+        ("modele", modele)
+    ])
+
+    # Entraîner le modèle
+    pipeline.fit(X_train, y_train)
+
+    print("Random Forest entraîné.")
+
+    return pipeline
+
+
+# =====================================================
+# 10. EVALUATION DES MODELES
+# =====================================================
+
+# Évalue les prédictions d'un modèle avec les métriques
+# de classification et les coûts métier d'Orbitalis.
+
+def evaluer_modele(nom_modele, y_reel, predictions, probabilites=None):
+
+    accuracy = accuracy_score(y_reel, predictions)
+    precision = precision_score(y_reel, predictions, zero_division=0)
+    recall = recall_score(y_reel, predictions, zero_division=0)
+    f1 = f1_score(y_reel, predictions, zero_division=0)
+    matrice = confusion_matrix(y_reel, predictions, labels=[0, 1])
+    cout = calculer_cout_metier(y_reel, predictions)
+
+    print(f"\nÉvaluation du modèle : {nom_modele}")
+    print("Accuracy :", round(accuracy, 3))
+    print("Précision :", round(precision, 3))
+    print("Recall :", round(recall, 3))
+    print("F1-score :", round(f1, 3))
+
+    print("\nMatrice de confusion :")
+    print(matrice)
+
+    print("Coût métier :", cout, "€")
+
+    if probabilites is not None:
+        if len(set(y_reel)) == 2:
+            pr_auc = average_precision_score(y_reel, probabilites)
+            print("Average Precision (résumé de la courbe PR) :",
+                  round(pr_auc, 3))
+
+    return {
+        "modele": nom_modele,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "cout_metier": cout
+    }
+
+# =====================================================
+# 11. SAUVEGARDE DU MODELE
 # =====================================================
 # À développer
 
 
 # =====================================================
-# 9. EVALUATION ET COMPARAISON DES MODELES
-# =====================================================
-# À développer
-
-
-# =====================================================
-# 10. SAUVEGARDE DU MODELE
-# =====================================================
-# À développer
-
-
-# =====================================================
-# 11. EXECUTION PRINCIPALE
+# 12. EXECUTION PRINCIPALE
 # =====================================================
 if __name__ == "__main__":
     pass

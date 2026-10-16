@@ -136,7 +136,7 @@ Le fichier `analyse_donnees.py` a pour objectif de préparer les données de la 
 
 **Choix des features**
 
-J'ai choisi de construire plusieurs familles de variables explicatives :
+On a choisi de construire plusieurs familles de variables explicatives :
 
 - **Équipements** : âge, durée de vie théorique restante et caractéristiques techniques.
 - **Télémétrie** : puissance, tension, courant, température et performance.
@@ -144,9 +144,9 @@ J'ai choisi de construire plusieurs familles de variables explicatives :
 - **Alarmes** : nombre d'alertes récentes, sévérité et temps écoulé depuis la dernière alarme.
 - **Maintenances** : nombre d'interventions précédentes, interventions correctives et temps depuis la dernière maintenance.
 
-Pour les variables évolutives, j'ai retenu des fenêtres historiques de **1h, 6h et 24h** afin d'étudier les changements rapides, les tendances intermédiaires et les évolutions plus longues.
+Pour les variables évolutives, on a retenu des fenêtres historiques de **1h, 6h et 24h** afin d'étudier les changements rapides, les tendances intermédiaires et les évolutions plus longues.
 
-J'ai volontairement choisi un ensemble assez large de features candidates. Une **matrice de corrélation**, puis l'analyse de leur importance dans les modèles ML, permettront d'identifier les variables les plus pertinentes et de retravailler cette sélection.
+On a volontairement choisi un ensemble assez large de features candidates. Une **matrice de corrélation**, puis l'analyse de leur importance dans les modèles ML, permettront d'identifier les variables les plus pertinentes et de retravailler cette sélection.
 
 **Définition de la variable cible**
 
@@ -166,7 +166,7 @@ Les features historiques utiliseront uniquement les informations disponibles à 
 Cette séparation est indispensable pour éviter les fuites de données et garantir une évaluation réaliste des modèles.
 
 
-## 7. Features : première sélection à confirmer
+## 7. Features
 
 Le jeu ML doit avoir **une ligne par équipement et date de décision `t`**, et non une multiplication de lignes liée à des jointures directes entre chaque mesure, chaque alarme et chaque maintenance.
 
@@ -230,13 +230,51 @@ La performance utilisée pour définir la cible devra également être validée,
 - Choisir sur validation le modèle et le seuil minimisant le coût métier.
 - Évaluer une seule fois sur test, puis sauvegarder modèle, prétraitement, colonnes et seuil.
 
-### Découpage temporelle retenu pour train et test
-Pour notre projet Orbitalis, nous avons retenu un découpage chronologique 70 % / 15 % / 15 %, avec une marge de sécurité de 9 heures entre les périodes.
-|Ensemble|	Utilisation|
-|--------|-------------|
-|Train| 70 %	|Entraîner la régression logistique et le Random Forest|
-|Validation|  15 %|	Comparer les modèles et choisir le seuil minimisant le coût métier|
-|Test| 15 %|	Évaluer une seule fois les performances finales|
+
+### Découpage des données : Train / Validation / Test
+
+Pour entraîner et évaluer les modèles de maintenance prédictive, on a choisi un **découpage chronologique des données en trois ensembles** :
+
+- **70 % — Train** : entraînement de la régression logistique et du Random Forest.
+- **15 % — Validation** : comparaison des modèles et optimisation du seuil de prédiction selon les coûts métier.
+- **15 % — Test** : évaluation finale du modèle retenu sur des données jamais utilisées pour l'entraînement ou la sélection.
+
+Contrairement à un découpage aléatoire, cette méthode respecte l'ordre temporel des observations afin de reproduire une situation réelle : **apprendre sur le passé pour prédire le futur**.
+
+Une **marge de sécurité de 9 heures** est appliquée avant les frontières entre les ensembles. Elle évite que les données futures utilisées pour construire la cible `degradation_9h` empiètent sur la période suivante.
+
+Les proportions sont calculées à partir des dates distinctes. Les observations situées dans les marges de sécurité sont exclues du découpage.
+
+
+### Évaluation et comparaison des modèles
+
+Pour évaluer les performances du système de maintenance prédictive, on a choisi de comparer trois approches : une **baseline naïve**, une **régression logistique** et un **Random Forest**.
+
+L'évaluation repose sur plusieurs indicateurs :
+
+- **Accuracy** : proportion de prédictions correctes.
+- **Précision** : proportion de dégradations réellement observées parmi celles prédites.
+- **Recall (rappel)** : capacité du modèle à détecter les dégradations réelles.
+- **F1-score** : compromis entre précision et rappel.
+- **Matrice de confusion** : répartition des vrais positifs, faux positifs, vrais négatifs et faux négatifs.
+- **Average Precision (AP)** : mesure de la capacité du modèle à classer les équipements selon leur risque de dégradation.
+
+**Prise en compte des coûts métier**
+
+Au-delà des métriques classiques, on a choisi d'intégrer les coûts définis dans le brief :
+
+| Résultat | Coût |
+|---|---:|
+| Vrai positif (TP) | 300 € |
+| Faux positif (FP) | 150 € |
+| Faux négatif (FN) | 2 500 € |
+| Vrai négatif (TN) | 0 € |
+
+L'objectif est de **minimiser le coût métier**, notamment en limitant les dégradations non détectées, particulièrement coûteuses.
+
+Les modèles seront d'abord comparés sur le jeu de validation. Le seuil de décision sera optimisé sur ce même ensemble, puis le modèle retenu sera évalué une seule fois sur le jeu de test.
+
+Cette démarche permet de sélectionner un modèle selon sa fiabilité, mais également selon les conséquences économiques de ses prédictions.
 
 ### `prediction.py`
 
@@ -244,16 +282,5 @@ Pour notre projet Orbitalis, nous avons retenu un découpage chronologique 70 % 
 - Préparer une nouvelle observation avec **le même schéma de features** et uniquement des données connues au temps de prédiction.
 - Fournir la probabilité de dégradation à 9 heures et la décision d'inspection associée.
 
-## 9. Points restant à vérifier avant codage de l'entraînement
-
-1. Définir la **puissance attendue** par type d'équipement ; valider le sens métier du seuil `0,65`, surtout pour les batteries et les convertisseurs.
-2. Vérifier la qualité de la correspondance orbitale (site, timestamp, `inconnu`) et l'absence d'utilisation d'informations futures.
-3. Vérifier la cardinalité de `seuil_alarme.type_alarme` et les écarts observés dans les décomptes d'alarmes.
-4. Déterminer le **nombre d'exemples positifs et négatifs** une fois la cible construite, par équipement et par segment chronologique.
-5. Définir la fréquence des instants de décision (`t`, par exemple toutes les 15 minutes), le minimum de données requis et les règles de gestion des fenêtres non observables.
-6. Contrôler les imputations de l'ETL et conserver des indicateurs de correction lorsque possible.
-7. Valider les dates de train, validation et test ainsi que les éventuels trous/purges temporelles.
-
----
 
 **Principe directeur :** l'objectif n'est pas de prédire davantage de maintenances planifiées, mais d'**anticiper des dégradations réelles** en minimisant le coût des mauvaises décisions, sans confondre éclipse, charge partielle et panne.
