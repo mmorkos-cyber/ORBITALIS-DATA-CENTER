@@ -20,6 +20,9 @@ from sklearn.metrics import (
     average_precision_score
 )
 import numpy as np
+import joblib
+import json
+from datetime import datetime, timezone
 
 
 # =====================================================
@@ -53,10 +56,14 @@ def preparer_X_y(df):
 
     df = df.copy()
 
-    # Retirer les observations sans cible
+    # Supprimer les lignes sans cible connue
     df = df.dropna(subset=["degradation_9h"])
 
-    # Définir les colonnes à exclure des features
+    # Remplacer les valeurs infinies par NaN
+    # Le préprocesseur pourra ensuite les imputer
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # Variables à exclure de l'entraînement
     colonnes_exclues = [
         "id_production",
         "id_equipement",
@@ -72,18 +79,21 @@ def preparer_X_y(df):
         "minute"
     ]
 
-    # Sélectionner les features
+    # Caractéristiques disponibles au moment de la prédiction
     X = df.drop(
         columns=colonnes_exclues,
         errors="ignore"
     )
-    print(X.columns.tolist())
 
-    # Sélectionner la cible
+    # Cible : dégradation dans les 9 heures futures
     y = df["degradation_9h"].astype(int)
 
-    print("Nombre d'observations :", len(df))
-    print("Nombre de features :", X.shape[1])
+    print("\n=== PREPARATION DU DATASET ===")
+    print("Observations :", len(df))
+    print("Nombre de variables :", X.shape[1])
+
+    print("\nRépartition de la cible :")
+    print(y.value_counts().to_string())
 
     return X, y, df
 
@@ -93,30 +103,33 @@ def preparer_X_y(df):
 
 def decouper_donnees_temporelles(X, y, df):
 
-    # Copier les dates pour travailler chronologiquement
     dates = pd.to_datetime(df["date"], utc=True)
 
-    # Récupérer les dates distinctes dans l'ordre
+    # Dates uniques triées chronologiquement
     dates_uniques = dates.drop_duplicates().sort_values()
 
-    # Définir les limites des trois périodes
-    limite_train = dates_uniques.iloc[int(len(dates_uniques) * 0.70)]
-    limite_validation = dates_uniques.iloc[int(len(dates_uniques) * 0.85)]
+    limite_train = dates_uniques.iloc[
+        int(len(dates_uniques) * 0.70)
+    ]
 
-    # Marge de sécurité de 9 heures
+    limite_validation = dates_uniques.iloc[
+        int(len(dates_uniques) * 0.85)
+    ]
+
+    # Horizon de prédiction : 9 heures
     marge = pd.Timedelta(hours=9)
 
-    # Définir les observations de chaque période
+    # Supprimer les dernières 9 heures de chaque période
+    # pour éviter le chevauchement des cibles
     masque_train = dates < limite_train - marge
 
     masque_validation = (
-        (dates >= limite_train) &
-        (dates < limite_validation - marge)
+        (dates >= limite_train)
+        & (dates < limite_validation - marge)
     )
 
     masque_test = dates >= limite_validation
 
-    # Séparer les features et les cibles
     X_train = X.loc[masque_train]
     X_val = X.loc[masque_validation]
     X_test = X.loc[masque_test]
@@ -125,12 +138,47 @@ def decouper_donnees_temporelles(X, y, df):
     y_val = y.loc[masque_validation]
     y_test = y.loc[masque_test]
 
-    # Afficher les tailles des ensembles
-    print("Train :", len(X_train), "observations")
-    print("Validation :", len(X_val), "observations")
-    print("Test :", len(X_test), "observations")
+    # Vérification des ensembles
+    print("\n=== DECOUPAGE CHRONOLOGIQUE ===")
 
-    return X_train, X_val, X_test, y_train, y_val, y_test
+    for nom, masque, cible in [
+        ("Train", masque_train, y_train),
+        ("Validation", masque_validation, y_val),
+        ("Test", masque_test, y_test)
+    ]:
+        dates_periode = dates.loc[masque]
+
+        print(
+            f"{nom} : {len(cible):,} observations "
+            f"| {dates_periode.min()} → {dates_periode.max()}"
+        )
+
+        print(
+            f"  Dégradations : {(cible == 1).sum():,} "
+            f"| Normales : {(cible == 0).sum():,}"
+        )
+
+    # Vérifier que les trois ensembles sont exploitables
+    for nom, cible in [
+        ("Train", y_train),
+        ("Validation", y_val),
+        ("Test", y_test)
+    ]:
+        if cible.empty:
+            raise ValueError(
+                f"Le jeu {nom} est vide."
+            )
+
+        if cible.nunique() < 2:
+            print(
+                f"ATTENTION : le jeu {nom} "
+                "ne contient qu'une seule classe."
+            )
+
+    return (
+        X_train, X_val, X_test,
+        y_train, y_val, y_test
+    )
 
 # =====================================================
 # 5. BASELINE NAIVE
@@ -138,31 +186,59 @@ def decouper_donnees_temporelles(X, y, df):
 
 def evaluer_baseline_naive(df):
 
-    # Ne conserver que les observations avec une cible connue
+    # Conserver uniquement les observations avec une cible connue
     df = df.dropna(subset=["degradation_9h"]).copy()
 
-    # Cible réelle
     y_reel = df["degradation_9h"].astype(int)
 
-    # Prédiction naïve à partir de la performance actuelle
-    prediction = (
-        (df["phase"] == "ensoleillement") &
-        (df["performance"] < 0.65)
-    ).astype(int)
+    # La baseline prédit 0 par défaut
+    predictions = pd.Series(
+        0,
+        index=df.index,
+        dtype=int
+    )
 
-    # Afficher les résultats
+    # Identifier les équipements utilisant un seuil de performance
+    masque_equipements = df["type_equipement"].isin([
+        "panneau_solaire",
+        "convertisseur_DC"
+    ])
+
+    # Prédire une dégradation si la performance actuelle
+    # est inférieure au seuil propre à l'équipement
+    masque_degradation = (
+        masque_equipements
+        & (df["phase"] == "ensoleillement")
+        & df["performance"].notna()
+        & df["seuil_degradation"].notna()
+        & (df["performance"] < df["seuil_degradation"])
+    )
+
+    predictions.loc[masque_degradation] = 1
+
+    # Vérifier les résultats
+    print("\n=== BASELINE NAIVE ===")
+
     print("Matrice de confusion :")
-    print(confusion_matrix(y_reel, prediction, labels=[0, 1]))
+    print(
+        confusion_matrix(
+            y_reel,
+            predictions,
+            labels=[0, 1]
+        )
+    )
 
     print("\nRapport de classification :")
-    print(classification_report(
-        y_reel,
-        prediction,
-        labels=[0, 1],
-        zero_division=0
-    ))
+    print(
+        classification_report(
+            y_reel,
+            predictions,
+            labels=[0, 1],
+            zero_division=0
+        )
+    )
 
-    return prediction
+    return predictions
 
 # =====================================================
 # 6. CALCUL DU COUT METIER
@@ -494,11 +570,155 @@ def evaluer_modele_final(comparaison, modele_logistique, modele_forest, X_test, 
 # =====================================================
 # 14. SAUVEGARDE DU MODELE
 # =====================================================
-# À développer
+# =====================================================
+# 14. SAUVEGARDE DU MODELE
+# =====================================================
+
+def sauvegarder_modele(modele, seuil, resultats):
+
+    # Si la baseline naïve est retenue,
+    # aucun modèle sklearn n'est à enregistrer.
+    if modele is None:
+        print("Baseline retenue : aucun modèle ML à sauvegarder.")
+        return
+
+    # Chemin du dossier de sauvegarde
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+    dossier_modeles = (
+        BASE_DIR / "data" / "propre" / "ml" / "modeles"
+    )
+
+    dossier_modeles.mkdir(parents=True, exist_ok=True)
+
+    # Chemins des fichiers
+    chemin_modele = dossier_modeles / "modele_degradation.joblib"
+    chemin_metadonnees = dossier_modeles / "modele_degradation.json"
+
+    # Sauvegarder le pipeline complet :
+    # prétraitement + modèle entraîné
+    joblib.dump(
+        {
+            "pipeline": modele,
+            "seuil_decision": float(seuil)
+        },
+        chemin_modele
+    )
+
+    # Métadonnées du modèle
+    metadonnees = {
+        "nom_modele": resultats["modele"],
+        "date_entrainement": datetime.now(timezone.utc).isoformat(),
+        "horizon_prediction_heures": 9,
+        "seuil_decision": float(seuil),
+        "accuracy": float(resultats["accuracy"]),
+        "precision": float(resultats["precision"]),
+        "recall": float(resultats["recall"]),
+        "f1_score": float(resultats["f1_score"]),
+        "cout_metier_eur": int(resultats["cout_metier"])
+    }
+
+    # Sauvegarder les métriques au format JSON
+    with open(chemin_metadonnees, "w", encoding="utf-8") as fichier:
+        json.dump(
+            metadonnees,
+            fichier,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    print("\n=== SAUVEGARDE DU MODELE ===")
+    print(f"Modèle enregistré : {chemin_modele}")
+    print(f"Métadonnées enregistrées : {chemin_metadonnees}")
 
 
 # =====================================================
-# 14. EXECUTION PRINCIPALE
+# 15. EXECUTION PRINCIPALE
 # =====================================================
+
+def main():
+
+    print("\n=== ENTRAINEMENT ML ORBITALIS ===")
+
+    # 1. Définir le chemin du dataset
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+    chemin_dataset = (
+        BASE_DIR
+        / "data"
+        / "propre"
+        / "ml"
+        / "orbitalis_ml_complet.parquet"
+    )
+
+    # 2. Charger les données
+    df = charger_dataset_ml(chemin_dataset)
+
+    # 3. Préparer les variables et la cible
+    X, y, df = preparer_X_y(df)
+
+    # 4. Découpage chronologique
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test
+    ) = decouper_donnees_temporelles(X, y, df)
+
+    # 5. Entraînement des modèles
+    print("\n=== ENTRAINEMENT DES MODELES ===")
+
+    modele_logistique = entrainer_regression_logistique(
+        X_train,
+        y_train
+    )
+
+    modele_forest = entrainer_random_forest(
+        X_train,
+        y_train
+    )
+
+    # 6. Récupérer les observations de validation
+    # pour évaluer la baseline naïve
+    df_val = df.loc[X_val.index]
+    df_test = df.loc[X_test.index]
+
+    # 7. Comparaison sur la validation
+    print("\n=== COMPARAISON SUR LA VALIDATION ===")
+
+    comparaison = comparer_modeles(
+        df_val,
+        X_val,
+        y_val,
+        modele_logistique,
+        modele_forest
+    )
+
+    # 8. Évaluation finale sur le test
+    print("\n=== EVALUATION FINALE ===")
+
+    meilleur_modele, seuil, resultats = evaluer_modele_final(
+        comparaison,
+        modele_logistique,
+        modele_forest,
+        X_test,
+        y_test,
+        df_test
+    )
+
+    # 9. Sauvegarde du meilleur modèle
+    sauvegarder_modele(
+        meilleur_modele,
+        seuil,
+        resultats
+    )
+    
+    print("\n=== FIN DE L'ENTRAINEMENT ===")
+
+    return meilleur_modele, seuil, resultats
+
+
 if __name__ == "__main__":
-    pass
+    main()
