@@ -19,6 +19,7 @@ from sklearn.metrics import (
     confusion_matrix,
     average_precision_score
 )
+import numpy as np
 
 
 # =====================================================
@@ -76,6 +77,7 @@ def preparer_X_y(df):
         columns=colonnes_exclues,
         errors="ignore"
     )
+    print(X.columns.tolist())
 
     # Sélectionner la cible
     y = df["degradation_9h"].astype(int)
@@ -344,13 +346,159 @@ def evaluer_modele(nom_modele, y_reel, predictions, probabilites=None):
     }
 
 # =====================================================
-# 11. SAUVEGARDE DU MODELE
+# 11. OPTIMISATION DU SEUIL DE DECISION
+# =====================================================
+
+# Recherche le seuil qui minimise le coût métier
+# à partir des probabilités du jeu de validation.
+
+def optimiser_seuil_metier(y_val, probabilites_val):
+
+    meilleur_seuil = 0.50
+    cout_minimum = float("inf")
+
+    # Tester les seuils entre 0.05 et 0.95
+    for seuil in np.arange(0.05, 0.96, 0.05):
+
+        # Transformer les probabilités en prédictions 0 ou 1
+        predictions = (probabilites_val >= seuil).astype(int)
+
+        # Calculer le coût métier
+        tn, fp, fn, tp = confusion_matrix(y_val, predictions, labels=[0, 1]).ravel()
+
+        cout = (tp * 300 + fp * 150 + fn * 2500)
+
+        # Conserver le seuil le moins coûteux
+        if cout < cout_minimum:
+            cout_minimum = cout
+            meilleur_seuil = seuil
+
+    print("Meilleur seuil :", round(meilleur_seuil, 2))
+    print("Coût minimum sur la validation :", cout_minimum, "€")
+
+    return meilleur_seuil
+
+# =====================================================
+# 12. COMPARAISON DES MODELES
+# =====================================================
+
+# Compare la baseline naïve, la régression logistique
+# et le Random Forest sur le jeu de validation.
+
+def comparer_modeles(df_val, X_val, y_val, modele_logistique, modele_forest):
+
+    resultats = []
+
+    # 1. Baseline naïve
+    predictions_baseline = evaluer_baseline_naive(df_val)
+    resultats_baseline = evaluer_modele("Baseline naïve", y_val, predictions_baseline)
+    resultats.append(resultats_baseline)
+
+    # 2. Régression logistique
+    probabilites_logistique = (modele_logistique.predict_proba(X_val)[:, 1])
+    seuil_logistique = optimiser_seuil_metier(y_val, probabilites_logistique)
+    predictions_logistique = (probabilites_logistique >= seuil_logistique).astype(int)
+
+    resultats_logistique = evaluer_modele(
+        "Régression logistique",
+        y_val,
+        predictions_logistique,
+        probabilites_logistique
+    )
+
+    resultats_logistique["seuil"] = seuil_logistique
+    resultats.append(resultats_logistique)
+
+    # 3. Random Forest
+    probabilites_forest = (modele_forest.predict_proba(X_val)[:, 1])
+
+    seuil_forest = optimiser_seuil_metier(y_val, probabilites_forest)
+
+    predictions_forest = (probabilites_forest >= seuil_forest).astype(int)
+
+    resultats_forest = evaluer_modele(
+        "Random Forest",
+        y_val,
+        predictions_forest,
+        probabilites_forest
+    )
+
+    resultats_forest["seuil"] = seuil_forest
+    resultats.append(resultats_forest)
+
+    # 4. Construire le tableau comparatif
+    comparaison = pd.DataFrame(resultats)
+
+    comparaison = comparaison.sort_values("cout_metier")
+
+    print("\nComparaison des modèles :")
+    print(comparaison.to_string(index=False))
+
+    return comparaison
+
+# =====================================================
+# 13. EVALUATION FINALE SUR LE JEU DE TEST
+# =====================================================
+
+# Évalue le modèle retenu sur les données de test,
+# avec le seuil sélectionné sur la validation.
+
+def evaluer_modele_final(comparaison, modele_logistique, modele_forest, X_test, y_test, df_test):
+
+    # Récupérer le modèle ayant le coût métier le plus faible
+    meilleur = comparaison.iloc[0]
+
+    nom_modele = meilleur["modele"]
+
+    print("\nModèle retenu :", nom_modele)
+
+    # Sélectionner le modèle et son seuil
+    if nom_modele == "Régression logistique":
+        modele = modele_logistique
+        seuil = meilleur["seuil"]
+
+    elif nom_modele == "Random Forest":
+        modele = modele_forest
+        seuil = meilleur["seuil"]
+
+    else:
+        # La baseline naïve ne nécessite pas de modèle ML
+        predictions = evaluer_baseline_naive(df_test)
+
+        resultats = evaluer_modele(
+            "Baseline naïve - Test",
+            y_test,
+            predictions
+        )
+
+        return None, None, resultats
+
+    # Calculer les probabilités sur le jeu de test
+    probabilites = modele.predict_proba(X_test)[:, 1]
+
+    # Appliquer le seuil déjà choisi sur la validation
+    predictions = (probabilites >= seuil).astype(int)
+
+    # Évaluer les prédictions
+    resultats = evaluer_modele(
+        nom_modele + " - Test",
+        y_test,
+        predictions,
+        probabilites
+    )
+
+    print("Seuil utilisé :", round(seuil, 2))
+
+    return modele, seuil, resultats
+
+# =====================================================
+# 14. SAUVEGARDE DU MODELE
 # =====================================================
 # À développer
 
 
 # =====================================================
-# 12. EXECUTION PRINCIPALE
+# 14. EXECUTION PRINCIPALE
 # =====================================================
 if __name__ == "__main__":
     pass
