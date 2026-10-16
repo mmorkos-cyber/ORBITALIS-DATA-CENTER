@@ -81,20 +81,22 @@ def initialiser_bdd():
         # TABLE EQUIPEMENT
         # ------------------------------------------------
         curseur.execute("""
-        CREATE TABLE IF NOT EXISTS equipement (
-            equipement_id TEXT PRIMARY KEY,
-            date_installation DATETIME,
-            statut TEXT,
-            site_id TEXT,
-            modele_id TEXT,
+            CREATE TABLE IF NOT EXISTS equipement (
+                equipement_id TEXT PRIMARY KEY,
+                date_installation DATETIME,
+                statut TEXT,
+                type_equipement TEXT,
+                puissance_nominale_w REAL,
+                site_id TEXT,
+                modele_id TEXT,
 
-            FOREIGN KEY (site_id)
-                REFERENCES sites(site_id),
+                FOREIGN KEY (site_id)
+                    REFERENCES sites(site_id),
 
-            FOREIGN KEY (modele_id)
-                REFERENCES modele(modele_id)
-        );
-        """)
+                FOREIGN KEY (modele_id)
+                    REFERENCES modele(modele_id)
+            );
+            """)
 
 
         # ------------------------------------------------
@@ -366,16 +368,20 @@ def inserer_equipement():
 
 # On récupère modele_id grâce à la colonne "modele"
         equipement.rename(
-            columns={"modele": "modele_id"},
+            columns={
+                "modele": "modele_id",
+                "type": "type_equipement"
+            },
             inplace=True
         )
-    
-# Insertion des données récupérées
+
         df_equipement_final = equipement[
             [
             "equipement_id",
             "date_installation",
             "statut",
+            "type_equipement",
+            "puissance_nominale_w",
             "site_id",
             "modele_id"
             ]
