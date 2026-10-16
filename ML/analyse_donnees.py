@@ -844,55 +844,151 @@ def afficher_matrice_correlation(df, chemin_sortie, nombre_max=25):
     plt.close(fig)
 
 
-def main():
-    racine = Path(__file__).resolve().parent
-    analyseur = argparse.ArgumentParser(description="Préparation des données ML Orbitalis")
-    analyseur.add_argument("--bdd-analytique", type=Path, default=DB_PATH)
-    analyseur.add_argument("--bdd-clean", type=Path, default=BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db")
-    analyseur.add_argument("--mode", choices=["test", "complet"], default="test")
-    analyseur.add_argument("--sortie", type=Path, default=racine / "data" / "ml")
-    analyseur.add_argument("--correlation", action="store_true")
-    args = analyseur.parse_args()
+# =====================================================
+# EXECUTION PRINCIPALE
+# =====================================================
 
-    df = charger_donnees_analytiques(args.bdd_analytique)
-    alarmes, maintenance = charger_donnees_historiques(args.bdd_clean)
-    print(f"Chargement : {len(df):,} mesures, {len(alarmes):,} alarmes, {len(maintenance):,} maintenances")
+def main():
+
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Préparation du dataset ML Orbitalis"
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["test", "complet"],
+        default="complet",
+        help="Mode d'exécution : test ou complet"
+    )
+
+    args = parser.parse_args()
+
+    # =====================================================
+    # 1. CHEMINS
+    # =====================================================
+
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+    chemin_analytique = (
+        BASE_DIR / "data" / "propre" / "base_analytique.db"
+    )
+
+    chemin_historique = (
+        BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db"
+    )
+
+    dossier_sortie = (
+        BASE_DIR / "data" / "propre" / "ml"
+    )
+
+    dossier_sortie.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # =====================================================
+    # 2. CHARGEMENT DES DONNEES
+    # =====================================================
+
+    df = charger_donnees_analytiques(chemin_analytique)
+
+    df_alarmes, df_maintenance = charger_donnees_historiques(
+        chemin_historique
+    )
+
+    print(
+        f"Chargement : {len(df):,} mesures, "
+        f"{len(df_alarmes)} alarmes, "
+        f"{len(df_maintenance)} maintenances"
+    )
+
+    # =====================================================
+    # 3. MODE TEST OU COMPLET
+    # =====================================================
 
     if args.mode == "test":
-        # Garder un bloc chronologique de 4 jours et 3 équipements.
-        # Les fenêtres de 24h et la cible de 9h disposent alors d'historique.
-        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-        premier_jour = df["date"].min()
+
         nombre_jours = 45
-        ids = df["id_equipement"].dropna().drop_duplicates().head(3)
+
+        equipements_test = (
+            df["id_equipement"]
+            .drop_duplicates()
+            .head(3)
+        )
+
         df = df[
-            df["id_equipement"].isin(ids)
-            & (df["date"] < premier_jour + pd.Timedelta(days=45))
+            df["id_equipement"].isin(equipements_test)
         ].copy()
+
+        premier_jour = pd.to_datetime(
+            df["date"], utc=True
+        ).min()
+
+        df = df[
+            pd.to_datetime(df["date"], utc=True)
+            < premier_jour + pd.Timedelta(days=nombre_jours)
+        ].copy()
+
         print(
             f"Mode test : {len(df):,} mesures "
             f"sur {df['id_equipement'].nunique()} équipements "
             f"/ {nombre_jours} jours"
         )
 
-    resultat = preparer_dataframe_ml(df, alarmes, maintenance)
-    controler_resultat(resultat)
+    # =====================================================
+    # 4. PREPARATION DES DONNEES
+    # =====================================================
 
-    args.sortie.mkdir(parents=True, exist_ok=True)
-    nom = "orbitalis_ml_test" if args.mode == "test" else "orbitalis_ml_complet"
-    chemin = args.sortie / f"{nom}.parquet"
-    try:
-        resultat.to_parquet(chemin, index=False)
-    except (ImportError, ModuleNotFoundError):
-        chemin = args.sortie / f"{nom}.csv"
-        resultat.to_csv(chemin, index=False)
-        print("Parquet indisponible (installer pyarrow pour un fichier plus compact).")
-    print("Dataset enregistré :", chemin)
+    df = normaliser_mesures(df)
 
-    if args.correlation:
-        image = args.sortie / f"{nom}_correlation.png"
-        afficher_matrice_correlation(resultat, image)
-        print("Matrice de corrélation :", image)
+    print(
+        f"Mesures à préparer : {len(df):,} "
+        f"/ équipements : {df['id_equipement'].nunique()}"
+    )
+
+    df = creer_features_equipement(df)
+
+    df = creer_features_telemetrie(df)
+
+    df = creer_features_orbite(df)
+
+    df = creer_features_alarmes(df, df_alarmes)
+
+    df = creer_features_maintenance(df, df_maintenance)
+
+    # =====================================================
+    # 5. CREATION DU SEUIL ET DE LA CIBLE
+    # =====================================================
+
+    df = creer_seuil_degradation(df)
+
+    df = creer_cible_degradation(df, df_alarmes)
+
+    # =====================================================
+    # 6. CONTROLE DU DATASET
+    # =====================================================
+
+    controler_resultat(df)
+
+    # =====================================================
+    # 7. ENREGISTREMENT DU DATASET
+    # =====================================================
+
+    if args.mode == "test":
+        nom_fichier = "orbitalis_ml_test.parquet"
+    else:
+        nom_fichier = "orbitalis_ml_complet.parquet"
+
+    chemin_sortie = dossier_sortie / nom_fichier
+
+    df.to_parquet(
+        chemin_sortie,
+        index=False
+    )
+
+    print(f"\nDataset enregistré : {chemin_sortie}")
 
 
 if __name__ == "__main__":
