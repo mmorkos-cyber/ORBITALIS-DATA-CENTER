@@ -1,7 +1,7 @@
 import sqlite3
 import time
 from pathlib import Path
-import extract_bdd as ex
+from pipeline_base_analytique import extract_bdd as ex
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_CLEAN = BASE_DIR / "data" / "propre" / "base_analytique.db"
@@ -51,7 +51,7 @@ CREATE TABLE fait_production (
 """
 
 SQL_FAIT_PRODUCTION = f"""
-ATTACH DATABASE '{ex.SOURCE_DB}' AS src;
+ATTACH DATABASE '{ex.SOURCE_DB.as_posix()}' AS src;
 PRAGMA main.journal_mode = OFF;
 PRAGMA main.synchronous = OFF;
 PRAGMA temp_store = MEMORY;
@@ -147,7 +147,7 @@ def insert_production(conn_dst):
     print(f"chargé en {time.time() - debut:.0f} s")
 
 
-if __name__ == "__main__":
+def run():
     DATA_CLEAN.unlink(missing_ok=True)
 
     conn_src = ex.get_connexion()
@@ -163,3 +163,7 @@ if __name__ == "__main__":
 
     conn_src.close()
     conn_dst.close()
+
+
+if __name__ == "__main__":
+    run()
