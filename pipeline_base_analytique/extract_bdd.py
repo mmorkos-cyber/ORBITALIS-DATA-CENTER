@@ -43,6 +43,7 @@ def prepa_dim_equipement(conn):
         JOIN sites s  ON e.site_id = s.site_id
     """, conn)
 
+
 def prepa_dim_temps(conn):
     return pd.read_sql_query(
         "SELECT DISTINCT timestamp FROM mesure_telemetrie",

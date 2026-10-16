@@ -212,7 +212,7 @@ def inserer_sites():
             how="left"
         )
 # Insertion des données récupérées
-        df_sites_final = sites[
+        df_sites_final = df_sites_final[
             [
                 "site_id",
                 "nom",

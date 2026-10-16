@@ -19,7 +19,14 @@ import pandas as pd
 
 
 # =====================================================
-# 1. CHARGEMENT ET VERIFICATION
+# 1. CONFIGURATION
+# =====================================================
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+DB_PATH = BASE_DIR / "data" / "propre" / "base_analytique.db"
+
+# =====================================================
+# 2. CHARGEMENT ET VERIFICATION
 # =====================================================
 
 def charger_donnees_analytiques(chemin_bdd):
@@ -32,16 +39,16 @@ def charger_donnees_analytiques(chemin_bdd):
             f.id_production, f.id_equipement,
             t.date, t.annee, t.mois, t.jour, t.heure, t.minute,
             e.type_equipement, e.statut, e.date_installation,
-            e.puissance_nominal_w, e.rendement_nomminal,
-            e.duree_vie_annee, e.masse_kg, e.altitude_km,
+            e.puissance_nominale_w, e.rendement_nominal,
+            e.duree_vie_annees, e.masse_kg, e.altitude_km,
             o.phase, o.rayonnement_solaire_w_m2, o.temperature_ambiante_c,
             f.puissance_w, f.rayonnement, f.courant_a, f.tension_v,
             f.temperature_c, f.performance,
             f.perte_production_w, f.perte_energie_kwh
-        FROM FAIT_PRODUCTION f
-        JOIN DIM_TEMPS t ON f.id_temps = t.id_temps
-        JOIN DIM_EQUIPEMENT e ON f.id_equipement = e.id_equipement
-        LEFT JOIN DIM_ORBITE o ON f.id_orbite = o.id_orbite
+        FROM fait_production f
+        JOIN dim_temps t ON f.id_temps = t.id_temps
+        JOIN dim_equipement e ON f.id_equipement = e.id_equipement
+        LEFT JOIN dim_orbite o ON f.id_orbite = o.id_orbite
     """
     try:
         with sqlite3.connect(chemin_bdd) as connexion:
@@ -84,7 +91,7 @@ def verifier_colonnes_ml(df):
     attendues = [
         "id_production", "id_equipement", "date", "annee", "mois", "jour",
         "heure", "minute", "type_equipement", "statut", "date_installation",
-        "puissance_nominal_w", "rendement_nomminal", "duree_vie_annee",
+        "puissance_nominale_w", "rendement_nominal", "duree_vie_annees",
         "masse_kg", "altitude_km", "phase", "rayonnement_solaire_w_m2",
         "temperature_ambiante_c", "puissance_w", "rayonnement", "courant_a",
         "tension_v", "temperature_c", "performance", "perte_production_w",
@@ -101,7 +108,7 @@ def normaliser_mesures(df):
     df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
     df = df.dropna(subset=["id_equipement", "date"])
     nombres = [
-        "puissance_nominal_w", "rendement_nomminal", "duree_vie_annee",
+        "puissance_nominale_w", "rendement_nominal", "duree_vie_annees",
         "masse_kg", "altitude_km", "rayonnement_solaire_w_m2",
         "temperature_ambiante_c", "puissance_w", "rayonnement", "courant_a",
         "tension_v", "temperature_c", "performance", "perte_production_w",
@@ -121,15 +128,15 @@ def normaliser_mesures(df):
 
 
 # =====================================================
-# 2. CREATION DES FEATURES
+# 3. CREATION DES FEATURES
 # =====================================================
 
 def creer_features_equipement(df):
     df = df.copy()
     installation = pd.to_datetime(df["date_installation"], utc=True, errors="coerce")
     df["age_equipement_annees"] = (df["date"] - installation).dt.total_seconds() / (365.25 * 86400)
-    df["duree_vie_restante"] = (df["duree_vie_annee"] - df["age_equipement_annees"]).clip(lower=0)
-    df["part_duree_vie_utilisee"] = df["age_equipement_annees"] / df["duree_vie_annee"].replace(0, np.nan)
+    df["duree_vie_restante"] = (df["duree_vie_annees"] - df["age_equipement_annees"]).clip(lower=0)
+    df["part_duree_vie_utilisee"] = df["age_equipement_annees"] / df["duree_vie_annees"].replace(0, np.nan)
     return df
 
 
@@ -254,7 +261,7 @@ def creer_features_temporelles(df):
 
 
 # =====================================================
-# 3. CREATION DE LA CIBLE A 9 HEURES
+# 4. CREATION DE LA CIBLE A 9 HEURES
 # =====================================================
 
 def creer_cible_degradation(df, df_alarmes):
@@ -310,7 +317,7 @@ def creer_cible_degradation(df, df_alarmes):
 
 
 # =====================================================
-# 4. PIPELINE ET CONTROLES
+# 5. PIPELINE ET CONTROLES
 # =====================================================
 
 def preparer_dataframe_ml(df, df_alarmes, df_maintenance):
@@ -413,4 +420,36 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+
+    if not DB_PATH.is_file():
+        raise FileNotFoundError(f"Base introuvable : {DB_PATH}")
+
+    with sqlite3.connect(DB_PATH) as connexion:
+        print("Connexion SQLite réussie !")
+
+        tables = pd.read_sql_query(
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+            connexion
+        )
+
+        print(tables)
+
+    with sqlite3.connect(DB_PATH) as connexion:
+
+        for table in [
+            "fait_production",
+            "dim_temps",
+            "dim_equipement",
+            "dim_orbite",
+            "dim_alarme",
+            "dim_maintenance"
+        ]:
+
+            colonnes = pd.read_sql_query(
+                f"PRAGMA table_info({table})",
+                connexion
+            )
+
+            print(f"\nTable : {table}")
+            print(colonnes["name"].tolist())
+
