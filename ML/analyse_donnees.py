@@ -403,7 +403,10 @@ def creer_cible_degradation(df, df_alarmes):
         subset=["id_equipement", "date_alarme"]
     )
 
-    # Garder les alarmes critiques liées au fonctionnement électrique
+    # =====================================================
+    # 1. SELECTION DES ALARMES CRITIQUES
+    # =====================================================
+
     alarmes = alarmes[
         (alarmes["severite"] == "critical")
         & alarmes["type_alarme"].isin([
@@ -420,7 +423,11 @@ def creer_cible_degradation(df, df_alarmes):
         )
     )
 
-    # Performance uniquement hors éclipse
+    # =====================================================
+    # 2. INITIALISATION DES VARIABLES
+    # =====================================================
+
+    # Ne conserver la performance que hors éclipse
     df["performance_hors_eclipse"] = df["performance"].where(
         df["phase"] == "ensoleillement"
     )
@@ -428,18 +435,24 @@ def creer_cible_degradation(df, df_alarmes):
     df["performance_moyenne_future_9h"] = np.nan
     df["degradation_9h"] = np.nan
 
-    # Fenêtre de prédiction de 9 heures
     duree = pd.Timedelta(hours=9).value
 
-    # 9h / 5 min = 108 mesures théoriques
-    # On accepte au minimum 98 mesures
+    # 108 mesures théoriques sur 9 heures, toutes phases confondues
     nb_mesures_min = 98
 
+    # Minimum de mesures hors éclipse pour évaluer la performance
+    nb_ensoleillees_min = 20
+
+    # =====================================================
+    # 3. CALCUL PAR EQUIPEMENT
+    # =====================================================
+
     for equipement, groupe in df.groupby(
-        "id_equipement", sort=False
+        "id_equipement",
+        sort=False
     ):
 
-        # Dates exprimées en nanosecondes
+        # Conversion explicite en nanosecondes
         dates = (
             groupe["date"]
             .to_numpy(dtype="datetime64[ns]")
@@ -450,12 +463,14 @@ def creer_cible_degradation(df, df_alarmes):
             "performance_hors_eclipse"
         ].to_numpy(dtype=float)
 
-        # Seuil personnalisé issu de l'historique passé
+        # Ce seuil intègre déjà :
+        # - 80 % de la référence glissante sur 7 jours
+        # - le plancher à 60 % de la référence initiale
         seuils = groupe[
             "seuil_degradation"
         ].to_numpy(dtype=float)
 
-        # Début et fin des fenêtres futures
+        # Fenêtre future : ]date actuelle ; date actuelle + 9 h]
         debut = np.searchsorted(
             dates,
             dates,
@@ -468,7 +483,10 @@ def creer_cible_degradation(df, df_alarmes):
             side="right"
         )
 
-        # Identifier les performances exploitables
+        # =====================================================
+        # 4. PERFORMANCE MOYENNE FUTURE
+        # =====================================================
+
         valides = np.isfinite(performances)
 
         sommes = np.concatenate((
@@ -497,14 +515,25 @@ def creer_cible_degradation(df, df_alarmes):
             where=nb_valides > 0
         )
 
-        # Vérifier que les 9 heures futures sont disponibles
+        # =====================================================
+        # 5. VERIFICATION DE LA COUVERTURE TEMPORELLE
+        # =====================================================
+
+        # La période complète de 9 heures doit être disponible
+        # avec au moins 98 mesures sur les 108 attendues.
         fenetre_couverte = (
             (dates + duree <= dates[-1])
             & ((fin - debut) >= nb_mesures_min)
         )
 
+        # Pour évaluer la performance, il faut aussi
+        # suffisamment de mesures ensoleillées.
+        mesures_ensoleillees_suffisantes = (
+            nb_valides >= nb_ensoleillees_min
+        )
+
         # =====================================================
-        # RECHERCHE DES ALARMES CRITIQUES DANS LES 9H FUTURES
+        # 6. ALARMES CRITIQUES DANS LES 9 HEURES FUTURES
         # =====================================================
 
         evenements = alarmes_par_equipement.get(equipement)
@@ -536,10 +565,12 @@ def creer_cible_degradation(df, df_alarmes):
                 side="right"
             )
 
-            presence_alarme = fin_evt > debut_evt
+            presence_alarme = (
+                fin_evt > debut_evt
+            )
 
         # =====================================================
-        # REGLE SELON LE TYPE D'EQUIPEMENT
+        # 7. REGLES SELON LE TYPE D'EQUIPEMENT
         # =====================================================
 
         type_equipement = groupe[
@@ -551,20 +582,22 @@ def creer_cible_degradation(df, df_alarmes):
             "convertisseur_DC"
         ]:
 
-            # Dégradation si la performance future moyenne
-            # est inférieure au seuil propre à l'équipement
+            # Une sous-performance est détectée lorsque
+            # la moyenne future passe sous le seuil individuel.
             degradation_performance = (
                 np.isfinite(moyennes)
                 & np.isfinite(seuils)
+                & mesures_ensoleillees_suffisantes
                 & (moyennes < seuils)
             )
 
-            # La cible est connue si le seuil et la moyenne
-            # sont disponibles, ou si une alarme critique survient
+            # Si aucune alarme critique n'est présente,
+            # il faut une moyenne future et un seuil fiables.
             cible_connue = (
                 (
                     np.isfinite(moyennes)
                     & np.isfinite(seuils)
+                    & mesures_ensoleillees_suffisantes
                 )
                 | presence_alarme
             )
@@ -572,7 +605,10 @@ def creer_cible_degradation(df, df_alarmes):
         else:
 
             # Batteries et autres équipements :
-            # pas de seuil fondé sur la puissance
+            # uniquement les alarmes critiques.
+            # Une batterie en recharge n'est donc pas
+            # considérée comme dégradée à cause
+            # de sa puissance négative.
             degradation_performance = np.zeros(
                 len(groupe),
                 dtype=bool
@@ -584,7 +620,7 @@ def creer_cible_degradation(df, df_alarmes):
             )
 
         # =====================================================
-        # CREATION DE LA CIBLE BINAIRE
+        # 8. CREATION DE LA CIBLE BINAIRE
         # =====================================================
 
         cible = np.full(
@@ -592,7 +628,7 @@ def creer_cible_degradation(df, df_alarmes):
             np.nan
         )
 
-        # 1 = dégradation
+        # 1 = sous-performance ou alarme critique
         positif = (
             fenetre_couverte
             & (
@@ -601,7 +637,7 @@ def creer_cible_degradation(df, df_alarmes):
             )
         )
 
-        # 0 = absence de dégradation selon notre règle
+        # 0 = aucune dégradation identifiée
         negatif = (
             fenetre_couverte
             & cible_connue
@@ -612,7 +648,10 @@ def creer_cible_degradation(df, df_alarmes):
         cible[positif] = 1
         cible[negatif] = 0
 
-        # Enregistrer les résultats
+        # =====================================================
+        # 9. ENREGISTREMENT DES RESULTATS
+        # =====================================================
+
         df.loc[
             groupe.index,
             "performance_moyenne_future_9h"
@@ -624,7 +663,6 @@ def creer_cible_degradation(df, df_alarmes):
         ] = cible
 
     return df
-
 # =====================================================
 # 5. PIPELINE ET CONTROLES
 # =====================================================
@@ -649,152 +687,138 @@ def preparer_dataframe_ml(df, df_alarmes, df_maintenance):
 
 def controler_resultat(df):
 
-    print("\n=== CONTROLE DU DATASET ===")
-
-    print("Dimensions :", df.shape)
-    print("Période :", df["date"].min(), "→", df["date"].max())
-    print("Équipements :", df["id_equipement"].nunique())
+    print("\n" + "=" * 55)
+    print("        BILAN DU DATASET ML ORBITALIS")
+    print("=" * 55)
 
     # =====================================================
-    # 1. REPARTITION DE LA CIBLE
+    # 1. INFORMATIONS GENERALES
     # =====================================================
 
-    print("\nRépartition de la cible (y compris NaN) :")
+    print("\n--- INFORMATIONS GENERALES ---")
 
-    print(
-        df["degradation_9h"].value_counts(dropna=False)
+    print(f"Nombre de lignes : {len(df):,}")
+    print(f"Nombre de colonnes : {len(df.columns)}")
+    print(f"Nombre d'équipements : {df['id_equipement'].nunique()}")
+    print(f"Début : {df['date'].min()}")
+    print(f"Fin   : {df['date'].max()}")
+
+    # =====================================================
+    # 2. REPARTITION DE LA CIBLE
+    # =====================================================
+
+    print("\n--- REPARTITION DE LA CIBLE ---")
+
+    repartition = df["degradation_9h"].value_counts(
+        dropna=False
     )
 
-    print("\nRépartition de la cible par équipement :")
+    print(repartition.to_string())
 
-    print(
-        pd.crosstab(
-            [df["id_equipement"], df["type_equipement"]],
-            df["degradation_9h"],
-            dropna=False
-        ).to_string()
-    )
+    nb_connues = df["degradation_9h"].notna().sum()
+    nb_degradations = (df["degradation_9h"] == 1).sum()
 
-    # =====================================================
-    # 2. PERFORMANCE HORS ECLIPSE
-    # =====================================================
-
-    print("\nPerformance hors éclipse par équipement :")
-
-    print(
-        df.groupby(["id_equipement", "type_equipement"])[
-            "performance_hors_eclipse"
-        ]
-        .agg(["min", "mean", "max"])
-        .round(3)
-        .to_string()
-    )
+    if nb_connues > 0:
+        pourcentage = nb_degradations / nb_connues * 100
+        print(f"\nDégradations parmi les cibles connues : {pourcentage:.2f} %")
 
     # =====================================================
-    # 3. COMPARAISON DES SEUILS
+    # 3. DEGRADATIONS PAR TYPE D'EQUIPEMENT
     # =====================================================
 
-    print("\nComparaison des seuils par équipement :")
+    print("\n--- DEGRADATIONS PAR TYPE D'EQUIPEMENT ---")
 
-    print(
-        df.groupby(["id_equipement", "type_equipement"])[
-            [
-                "performance_initiale",
-                "performance_reference",
-                "seuil_glissant",
-                "seuil_plancher",
-                "seuil_degradation"
-            ]
-        ]
-        .mean()
-        .round(3)
-        .to_string()
-    )
-
-    # =====================================================
-    # 4. VERIFIER SI LE PLANCHER INTERVIENT
-    # =====================================================
-
-    print("\nNombre de fois où le plancher intervient :")
-
-    print(
-        df.assign(
-            plancher_actif=(
-                df["seuil_plancher"] > df["seuil_glissant"]
-            )
+    bilan_types = (
+        df.groupby("type_equipement")
+        .agg(
+            nb_mesures=("degradation_9h", "size"),
+            normales=("degradation_9h", lambda x: (x == 0).sum()),
+            degradations=("degradation_9h", lambda x: (x == 1).sum()),
+            inconnues=("degradation_9h", lambda x: x.isna().sum())
         )
-        .groupby("id_equipement")["plancher_actif"]
+    )
+
+    bilan_types["taux_degradation_pct"] = (
+        bilan_types["degradations"]
+        / (bilan_types["normales"] + bilan_types["degradations"])
+        * 100
+    ).round(2)
+
+    print(bilan_types.to_string())
+
+    # =====================================================
+    # 4. RESUME DES SEUILS
+    # =====================================================
+
+    print("\n--- SEUILS DE DEGRADATION PAR TYPE ---")
+
+    equipements = df[
+        df["type_equipement"].isin([
+            "panneau_solaire",
+            "convertisseur_DC"
+        ])
+    ]
+
+    resume_seuils = (
+        equipements.groupby("type_equipement")
+        .agg(
+            reference_moyenne=("performance_reference", "mean"),
+            seuil_glissant_moyen=("seuil_glissant", "mean"),
+            seuil_plancher_moyen=("seuil_plancher", "mean"),
+            seuil_final_moyen=("seuil_degradation", "mean")
+        )
+        .round(3)
+    )
+
+    print(resume_seuils.to_string())
+
+    # =====================================================
+    # 5. ACTIVATION DU SEUIL PLANCHER
+    # =====================================================
+
+    print("\n--- ACTIVATION DU SEUIL PLANCHER ---")
+
+    plancher_actif = (
+        equipements["seuil_plancher"]
+        > equipements["seuil_glissant"]
+    )
+
+    print(f"Nombre de mesures avec plancher actif : {plancher_actif.sum():,}")
+
+    if len(equipements) > 0:
+        print(
+            f"Pourcentage des mesures concernées : "
+            f"{plancher_actif.mean() * 100:.2f} %"
+        )
+
+    # =====================================================
+    # 6. VALEURS MANQUANTES IMPORTANTES
+    # =====================================================
+
+    print("\n--- VALEURS MANQUANTES ---")
+
+    colonnes_a_verifier = [
+        "phase",
+        "performance",
+        "performance_reference",
+        "seuil_degradation",
+        "degradation_9h"
+    ]
+
+    print(
+        df[colonnes_a_verifier]
+        .isna()
         .sum()
         .to_string()
     )
 
     # =====================================================
-    # 5. EVOLUTION JOURNALIERE DES SEUILS
+    # 7. CONCLUSION
     # =====================================================
 
-    print("\nEvolution des seuils par jour :")
-
-    print(
-        df.assign(
-            jour_analyse=df["date"].dt.date
-        )
-        .groupby(["id_equipement", "jour_analyse"])[
-            [
-                "performance_reference",
-                "seuil_glissant",
-                "seuil_plancher",
-                "seuil_degradation"
-            ]
-        ]
-        .mean()
-        .round(3)
-        .to_string()
-    )
-
-    # =====================================================
-    # 6. EXEMPLE DES CIBLES CALCULEES
-    # =====================================================
-
-    print("\nExemple des premières mesures :")
-
-    print(
-        df[
-            [
-                "id_equipement",
-                "date",
-                "performance_reference",
-                "seuil_degradation",
-                "performance_moyenne_future_9h",
-                "degradation_9h"
-            ]
-        ]
-        .head(8)
-        .to_string(index=False)
-    )
-
-    # =====================================================
-    # 7. POINTS DE VIGILANCE
-    # =====================================================
-
-    print(
-        "\nATTENTION : cible exploratoire, "
-        "valider la définition métier de performance."
-    )
-
-    print(
-        "ATTENTION : contrôler les imputations ETL "
-        "(bfill/interpolation utilisant le futur)."
-    )
-
-    print(
-        "ATTENTION : attendre la correction des id_orbite "
-        "pour valider les résultats définitifs."
-    )
-
-    print(
-        "Ne jamais inclure performance_moyenne_future_9h "
-        "ou performance_hors_eclipse comme variables futures."
-    )
+    print("\n" + "=" * 55)
+    print("FIN DU CONTROLE DU DATASET")
+    print("=" * 55)
 
 
 def afficher_matrice_correlation(df, chemin_sortie, nombre_max=25):
@@ -839,12 +863,17 @@ def main():
         # Les fenêtres de 24h et la cible de 9h disposent alors d'historique.
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         premier_jour = df["date"].min()
+        nombre_jours = 45
         ids = df["id_equipement"].dropna().drop_duplicates().head(3)
         df = df[
             df["id_equipement"].isin(ids)
             & (df["date"] < premier_jour + pd.Timedelta(days=45))
         ].copy()
-        print(f"Mode test : {len(df):,} mesures sur 3 équipements maximum / 4 jours")
+        print(
+            f"Mode test : {len(df):,} mesures "
+            f"sur {df['id_equipement'].nunique()} équipements "
+            f"/ {nombre_jours} jours"
+        )
 
     resultat = preparer_dataframe_ml(df, alarmes, maintenance)
     controler_resultat(resultat)
