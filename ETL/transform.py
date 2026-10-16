@@ -320,26 +320,13 @@ df_telemetrie["temperature_c"] = (
 # Récupérer le site et le modèle de chaque équipement
 
 df_telemetrie = df_telemetrie.merge(
-    df_equipement[
-        ["equipement_id", "site_id", "modele"]
-    ],
+    df_equipement[["equipement_id", "site_id", "modele", "type"]],
     on="equipement_id",
     how="left",
     validate="many_to_one"
 )
 
-# Récupérer le type d'équipement depuis le catalogue
-
-df_telemetrie = df_telemetrie.merge(
-    df_modeles[
-        ["modele_id", "type_equipement"]
-    ],
-    left_on="modele",
-    right_on="modele_id",
-    how="left",
-    validate="many_to_one"
-)
-
+df_telemetrie = df_telemetrie.rename(columns={"type": "type_equipement"})
 
 # =====================================================
 # TRAITEMENT DES PUISSANCES NEGATIVES
@@ -630,15 +617,7 @@ print(
 # Cette suppression intervient après tous les calculs
 # utilisant type_equipement.
 
-df_telemetrie = df_telemetrie.drop(
-    columns=[
-        "site_id",
-        "phase",
-        "modele",
-        "modele_id",
-        "type_equipement"
-    ]
-)
+df_telemetrie = df_telemetrie.drop(columns=["site_id", "phase", "modele", "type_equipement"])
 
 
 # =====================================================

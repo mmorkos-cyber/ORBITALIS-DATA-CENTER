@@ -35,12 +35,25 @@ def prepa_dim_alarme(conn):
 
 def prepa_dim_equipement(conn):
     return pd.read_sql_query("""
-        SELECT e.equipement_id AS id_equipement, m.type_equipement, e.statut,
-               e.date_installation, m.puissance_nominale_w, m.rendement_nominal,
-               m.duree_vie_annees, m.masse_kg, s.altitude_km
+        SELECT e.equipement_id AS id_equipement,
+               e.type_equipement,
+               e.statut,
+               e.date_installation,
+               e.puissance_nominale_w,
+               m.rendement_nominal,
+               m.duree_vie_annees,
+               m.masse_kg,
+               s.altitude_km
         FROM equipement e
-        JOIN modele m ON e.modele_id = m.modele_id
-        JOIN sites s  ON e.site_id = s.site_id
+        LEFT JOIN (
+            SELECT SUBSTR(modele_id, 1, 7) AS prefixe,
+                   AVG(rendement_nominal) AS rendement_nominal,
+                   CAST(ROUND(AVG(duree_vie_annees)) AS INTEGER) AS duree_vie_annees,
+                   AVG(masse_kg) AS masse_kg
+            FROM modele
+            GROUP BY SUBSTR(modele_id, 1, 7)
+        ) m ON m.prefixe = SUBSTR(e.modele_id, 1, 7)
+        JOIN sites s ON e.site_id = s.site_id
     """, conn)
 
 

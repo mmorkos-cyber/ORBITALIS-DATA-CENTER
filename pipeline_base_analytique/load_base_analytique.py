@@ -77,6 +77,13 @@ SELECT equipement_id, date_debut, date_fin, maintenance_id
 FROM src.maintenance;
 CREATE INDEX ix_t_maint ON t_maint(equipement_id, date_debut);
 
+-- Models: one row per prefix
+CREATE TEMP TABLE t_modele AS
+SELECT SUBSTR(modele_id, 1, 7)   AS prefixe,
+       AVG(puissance_nominale_w) AS puissance_nominale_w
+FROM src.modele
+GROUP BY SUBSTR(modele_id, 1, 7);
+
 INSERT INTO fait_production (
     id_production, id_equipement, id_temps, id_orbite, id_maintenance, id_alarme,
     puissance_w, puissance_nominale_w, rayonnement, courant_a, tension_v, temperature_c,
@@ -84,22 +91,20 @@ INSERT INTO fait_production (
 )
 WITH base AS (
     SELECT
-        mt.mesure_id     AS id_production,
+        mt.mesure_id AS id_production,
         mt.equipement_id AS id_equipement,
-        mt.timestamp     AS ts,
+        mt.timestamp AS ts,
         o.id_orbite,
         (SELECT m.maintenance_id FROM t_maint m
           WHERE m.equipement_id = mt.equipement_id
             AND mt.timestamp BETWEEN m.date_debut AND m.date_fin
           LIMIT 1)       AS id_maintenance,
         a.id_alarme,
-        mt.puissance_w, mo.puissance_nominale_w, mt.rayonnement,
+        mt.puissance_w, e.puissance_nominale_w, mt.rayonnement,
         mt.courant_a, mt.tension_v, mt.temperature_c
     FROM src.mesure_telemetrie mt
     JOIN src.equipement e ON e.equipement_id = mt.equipement_id
-    JOIN src.modele mo    ON mo.modele_id = e.modele_id
-    LEFT JOIN t_orbite o  ON o.site_id = e.site_id
-                         AND o.timestamp = mt.timestamp
+    LEFT JOIN t_orbite o  ON o.site_id = e.site_id AND o.timestamp = datetime((CAST(strftime('%s', mt.timestamp) AS INTEGER) / 900) * 900, 'unixepoch')
     LEFT JOIN t_alarme a  ON a.equipement_id = mt.equipement_id
                          AND a.timestamp = mt.timestamp
 ),
@@ -113,7 +118,7 @@ SELECT
     strftime('%Y%m%d%H%M%S', ts),
     id_orbite, id_maintenance, id_alarme,
     puissance_w, puissance_nominale_w, rayonnement, courant_a, tension_v, temperature_c,
-    puissance_w / puissance_nominale_w,
+    puissance_w / NULLIF(puissance_nominale_w, 0),
     MAX(COALESCE(precedente - puissance_w, 0), 0),
     MAX(COALESCE(precedente - puissance_w, 0), 0) * 5.0 / 60 / 1000
 FROM avec_precedente;
@@ -141,10 +146,14 @@ def insert_temps(conn_src, conn_dst):
 
 
 def insert_production(conn_dst):
-    debut = time.time()
-    conn_dst.executescript(SQL_FAIT_PRODUCTION)
-    conn_dst.commit()
-    print(f"chargé en {time.time() - debut:.0f} s")
+    try:
+        debut = time.time()
+        conn_dst.executescript(SQL_FAIT_PRODUCTION)
+        conn_dst.commit()
+        print(f"chargé en {time.time() - debut:.0f} s")
+    except Exception as e:
+        print(f"Erreur fait_production : {e}")
+        raise
 
 
 def run():
