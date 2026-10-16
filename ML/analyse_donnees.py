@@ -68,9 +68,27 @@ def charger_donnees_historiques(chemin_bdd):
         raise FileNotFoundError(f"Base nettoyée introuvable : {chemin_bdd}")
     try:
         with sqlite3.connect(chemin_bdd) as connexion:
-            alarmes = pd.read_sql_query("SELECT * FROM alarmes", connexion)
-            maintenance = pd.read_sql_query("SELECT * FROM maintenance", connexion)
+            alarmes = pd.read_sql_query(
+                """
+                SELECT
+                    a.alarme_id,
+                    a.equipement_id AS id_equipement,
+                    a.timestamp AS date_alarme,
+                    a.severite,
+                    a.acquittee,
+                    s.type_alarme
+                FROM alarmes a
+                LEFT JOIN seuil_alarme s
+                    ON a.id_seuil = s.id_seuil
+                """,
+                connexion
+            )
+            maintenance = pd.read_sql_query(
+                "SELECT * FROM maintenance",
+                  connexion)
+            
     except sqlite3.Error as erreur:
+        
         raise RuntimeError(f"Lecture des historiques impossible : {erreur}") from erreur
 
     # Adapte les noms usuels de la base nettoyée à ceux utilisés par le ML.
@@ -199,8 +217,8 @@ def creer_features_alarmes(df, df_alarmes):
         evenements = alarmes_par_equipement.get(equipement)
         if evenements is None or evenements.empty:
             continue
-        dates = groupe["date"].astype("int64").to_numpy()
-        dates_evt = evenements["date_alarme"].astype("int64").to_numpy()
+        dates = groupe["date"].to_numpy(dtype="datetime64[ns]").astype("int64")
+        dates_evt = evenements["date_alarme"].to_numpy(dtype="datetime64[ns]").astype("int64")
         fin = np.searchsorted(dates_evt, dates, side="right")
         for heures in (1, 6, 24):
             debut = np.searchsorted(dates_evt, dates - pd.Timedelta(hours=heures).value, side="right")
@@ -235,8 +253,8 @@ def creer_features_maintenance(df, df_maintenance):
         evenements = maintenance_par_equipement.get(equipement)
         if evenements is None or evenements.empty:
             continue
-        dates = groupe["date"].astype("int64").to_numpy()
-        dates_evt = evenements["date_fin"].astype("int64").to_numpy()
+        dates = groupe["date"].to_numpy(dtype="datetime64[ns]").astype("int64")
+        dates_evt = evenements["date_fin"].to_numpy(dtype="datetime64[ns]").astype("int64")
         fin = np.searchsorted(dates_evt, dates, side="right")
         debut = np.searchsorted(dates_evt, dates - pd.Timedelta(days=30).value, side="right")
         df.loc[groupe.index, "nb_maintenances_precedentes"] = fin
@@ -264,57 +282,348 @@ def creer_features_temporelles(df):
 # 4. CREATION DE LA CIBLE A 9 HEURES
 # =====================================================
 
-def creer_cible_degradation(df, df_alarmes):
-    df = df.copy().sort_values(["id_equipement", "date"]).reset_index(drop=True)
-    alarmes = df_alarmes.copy()
-    alarmes["date_alarme"] = pd.to_datetime(alarmes["date_alarme"], utc=True, errors="coerce")
-    alarmes = alarmes.dropna(subset=["id_equipement", "date_alarme"])
-    alarmes = alarmes[
-        (alarmes["severite"] == "critical") &
-        alarmes["type_alarme"].isin(["perte_puissance", "surcharge", "surchauffe"])
-    ]
-    alarmes_par_equipement = dict(tuple(alarmes.sort_values("date_alarme").groupby("id_equipement")))
+def creer_seuil_degradation(df):
 
-    df["performance_hors_eclipse"] = df["performance"].where(df["phase"] == "ensoleillement")
-    df["performance_moyenne_future_9h"] = np.nan
-    df["degradation_9h"] = np.nan
-    duree = pd.Timedelta(hours=9).value
-    # 9h / 5min = 108 mesures théoriques, tolérance de 10% d'absences.
-    nb_mesures_min = 98
+    df = df.copy().sort_values(
+        ["id_equipement", "date"]
+    )
 
-    for equipement, groupe in df.groupby("id_equipement", sort=False):
-        dates = groupe["date"].astype("int64").to_numpy()
-        performances = groupe["performance_hors_eclipse"].to_numpy(dtype=float)
-        debut = np.searchsorted(dates, dates, side="right")
-        fin = np.searchsorted(dates, dates + duree, side="right")
-        valides = np.isfinite(performances)
-        sommes = np.concatenate(([0.0], np.cumsum(np.where(valides, performances, 0.0))))
-        nombres = np.concatenate(([0], np.cumsum(valides)))
-        nb_valides = nombres[fin] - nombres[debut]
-        moyennes = np.full(len(groupe), np.nan)
-        np.divide(sommes[fin] - sommes[debut], nb_valides, out=moyennes, where=nb_valides > 0)
+    # =====================================================
+    # 1. PERFORMANCE HORS ECLIPSE
+    # =====================================================
 
-        # Dernière mesure disponible + au moins 90 % des horodatages attendus.
-        fenetre_couverte = (dates + duree <= dates[-1]) & ((fin - debut) >= nb_mesures_min)
-        evenements = alarmes_par_equipement.get(equipement)
-        if evenements is None or evenements.empty:
-            presence_alarme = np.zeros(len(groupe), dtype=bool)
-        else:
-            dates_evt = evenements["date_alarme"].astype("int64").to_numpy()
-            debut_evt = np.searchsorted(dates_evt, dates, side="right")
-            fin_evt = np.searchsorted(dates_evt, dates + duree, side="right")
-            presence_alarme = fin_evt > debut_evt
+    df["performance_hors_eclipse"] = df["performance"].where(
+        df["phase"] == "ensoleillement"
+    )
 
-        cible = np.full(len(groupe), np.nan)
-        # Conserver une cible inconnue si la fenêtre n'est pas assez observée.
-        positif = fenetre_couverte & ((moyennes < 0.65) | presence_alarme)
-        negatif = fenetre_couverte & np.isfinite(moyennes) & (moyennes >= 0.65) & ~presence_alarme
-        cible[positif] = 1
-        cible[negatif] = 0
-        df.loc[groupe.index, "performance_moyenne_future_9h"] = moyennes
-        df.loc[groupe.index, "degradation_9h"] = cible
+    # =====================================================
+    # 2. REFERENCE HISTORIQUE GLISSANTE SUR 7 JOURS
+    # =====================================================
+
+    # Utiliser uniquement les mesures antérieures
+    # à chaque observation
+
+    df["performance_reference"] = (
+        df.groupby("id_equipement", group_keys=False)
+        .apply(
+            lambda groupe: (
+                groupe.set_index("date")["performance_hors_eclipse"]
+                .rolling("7D", closed="left", min_periods=24)
+                .mean()
+                .set_axis(groupe.index)
+            ),
+            include_groups=False
+        )
+        .sort_index()
+    )
+
+    # =====================================================
+    # 3. SEUIL GLISSANT : 80 % DE LA REFERENCE
+    # =====================================================
+
+    df["seuil_glissant"] = (
+        df["performance_reference"] * 0.80
+    )
+
+    # =====================================================
+    # 4. REFERENCE INITIALE PAR EQUIPEMENT
+    # =====================================================
+
+    # Prendre les premières 24 mesures valides hors éclipse.
+    # La référence devient disponible après ces 24 mesures.
+    # Elle reste ensuite figée pour chaque équipement.
+
+    df["performance_initiale"] = np.nan
+
+    for equipement, groupe in df.groupby("id_equipement"):
+
+        performances = groupe[
+            "performance_hors_eclipse"
+        ].dropna()
+
+        if len(performances) < 24:
+            continue
+
+        indices_initiaux = performances.index[:24]
+
+        reference_initiale = performances.iloc[:24].mean()
+
+        date_disponibilite = df.loc[
+            indices_initiaux[-1], "date"
+        ]
+
+        masque = (
+            (df["id_equipement"] == equipement)
+            & (df["date"] > date_disponibilite)
+        )
+
+        df.loc[
+            masque, "performance_initiale"
+        ] = reference_initiale
+
+    # =====================================================
+    # 5. SEUIL PLANCHER : 60 % DE LA REFERENCE INITIALE
+    # =====================================================
+
+    df["seuil_plancher"] = (
+        df["performance_initiale"] * 0.60
+    )
+
+    # =====================================================
+    # 6. SEUIL FINAL DE DEGRADATION
+    # =====================================================
+
+    # On retient le plus élevé des deux seuils :
+    # - seuil glissant
+    # - seuil plancher
+    #
+    # Le plancher empêche le seuil de diminuer indéfiniment.
+
+    df["seuil_degradation"] = df[
+        ["seuil_glissant", "seuil_plancher"]
+    ].max(axis=1, skipna=False)
+
     return df
 
+def creer_cible_degradation(df, df_alarmes):
+
+    df = df.copy().sort_values(
+        ["id_equipement", "date"]
+    ).reset_index(drop=True)
+
+    alarmes = df_alarmes.copy()
+
+    alarmes["date_alarme"] = pd.to_datetime(
+        alarmes["date_alarme"],
+        utc=True,
+        errors="coerce"
+    )
+
+    alarmes = alarmes.dropna(
+        subset=["id_equipement", "date_alarme"]
+    )
+
+    # Garder les alarmes critiques liées au fonctionnement électrique
+    alarmes = alarmes[
+        (alarmes["severite"] == "critical")
+        & alarmes["type_alarme"].isin([
+            "perte_puissance",
+            "surcharge",
+            "surchauffe"
+        ])
+    ]
+
+    alarmes_par_equipement = dict(
+        tuple(
+            alarmes.sort_values("date_alarme")
+            .groupby("id_equipement")
+        )
+    )
+
+    # Performance uniquement hors éclipse
+    df["performance_hors_eclipse"] = df["performance"].where(
+        df["phase"] == "ensoleillement"
+    )
+
+    df["performance_moyenne_future_9h"] = np.nan
+    df["degradation_9h"] = np.nan
+
+    # Fenêtre de prédiction de 9 heures
+    duree = pd.Timedelta(hours=9).value
+
+    # 9h / 5 min = 108 mesures théoriques
+    # On accepte au minimum 98 mesures
+    nb_mesures_min = 98
+
+    for equipement, groupe in df.groupby(
+        "id_equipement", sort=False
+    ):
+
+        # Dates exprimées en nanosecondes
+        dates = (
+            groupe["date"]
+            .to_numpy(dtype="datetime64[ns]")
+            .astype("int64")
+        )
+
+        performances = groupe[
+            "performance_hors_eclipse"
+        ].to_numpy(dtype=float)
+
+        # Seuil personnalisé issu de l'historique passé
+        seuils = groupe[
+            "seuil_degradation"
+        ].to_numpy(dtype=float)
+
+        # Début et fin des fenêtres futures
+        debut = np.searchsorted(
+            dates,
+            dates,
+            side="right"
+        )
+
+        fin = np.searchsorted(
+            dates,
+            dates + duree,
+            side="right"
+        )
+
+        # Identifier les performances exploitables
+        valides = np.isfinite(performances)
+
+        sommes = np.concatenate((
+            [0.0],
+            np.cumsum(
+                np.where(valides, performances, 0.0)
+            )
+        ))
+
+        nombres = np.concatenate((
+            [0],
+            np.cumsum(valides)
+        ))
+
+        nb_valides = nombres[fin] - nombres[debut]
+
+        moyennes = np.full(
+            len(groupe),
+            np.nan
+        )
+
+        np.divide(
+            sommes[fin] - sommes[debut],
+            nb_valides,
+            out=moyennes,
+            where=nb_valides > 0
+        )
+
+        # Vérifier que les 9 heures futures sont disponibles
+        fenetre_couverte = (
+            (dates + duree <= dates[-1])
+            & ((fin - debut) >= nb_mesures_min)
+        )
+
+        # =====================================================
+        # RECHERCHE DES ALARMES CRITIQUES DANS LES 9H FUTURES
+        # =====================================================
+
+        evenements = alarmes_par_equipement.get(equipement)
+
+        if evenements is None or evenements.empty:
+
+            presence_alarme = np.zeros(
+                len(groupe),
+                dtype=bool
+            )
+
+        else:
+
+            dates_evt = (
+                evenements["date_alarme"]
+                .to_numpy(dtype="datetime64[ns]")
+                .astype("int64")
+            )
+
+            debut_evt = np.searchsorted(
+                dates_evt,
+                dates,
+                side="right"
+            )
+
+            fin_evt = np.searchsorted(
+                dates_evt,
+                dates + duree,
+                side="right"
+            )
+
+            presence_alarme = fin_evt > debut_evt
+
+        # =====================================================
+        # REGLE SELON LE TYPE D'EQUIPEMENT
+        # =====================================================
+
+        type_equipement = groupe[
+            "type_equipement"
+        ].iloc[0]
+
+        if type_equipement in [
+            "panneau_solaire",
+            "convertisseur_DC"
+        ]:
+
+            # Dégradation si la performance future moyenne
+            # est inférieure au seuil propre à l'équipement
+            degradation_performance = (
+                np.isfinite(moyennes)
+                & np.isfinite(seuils)
+                & (moyennes < seuils)
+            )
+
+            # La cible est connue si le seuil et la moyenne
+            # sont disponibles, ou si une alarme critique survient
+            cible_connue = (
+                (
+                    np.isfinite(moyennes)
+                    & np.isfinite(seuils)
+                )
+                | presence_alarme
+            )
+
+        else:
+
+            # Batteries et autres équipements :
+            # pas de seuil fondé sur la puissance
+            degradation_performance = np.zeros(
+                len(groupe),
+                dtype=bool
+            )
+
+            cible_connue = np.ones(
+                len(groupe),
+                dtype=bool
+            )
+
+        # =====================================================
+        # CREATION DE LA CIBLE BINAIRE
+        # =====================================================
+
+        cible = np.full(
+            len(groupe),
+            np.nan
+        )
+
+        # 1 = dégradation
+        positif = (
+            fenetre_couverte
+            & (
+                degradation_performance
+                | presence_alarme
+            )
+        )
+
+        # 0 = absence de dégradation selon notre règle
+        negatif = (
+            fenetre_couverte
+            & cible_connue
+            & ~degradation_performance
+            & ~presence_alarme
+        )
+
+        cible[positif] = 1
+        cible[negatif] = 0
+
+        # Enregistrer les résultats
+        df.loc[
+            groupe.index,
+            "performance_moyenne_future_9h"
+        ] = moyennes
+
+        df.loc[
+            groupe.index,
+            "degradation_9h"
+        ] = cible
+
+    return df
 
 # =====================================================
 # 5. PIPELINE ET CONTROLES
@@ -330,22 +639,162 @@ def preparer_dataframe_ml(df, df_alarmes, df_maintenance):
     df = creer_features_orbite(df)
     df = creer_features_alarmes(df, df_alarmes)
     df = creer_features_maintenance(df, df_maintenance)
+    # Calculer un seuil propre à chaque équipement
+    df = creer_seuil_degradation(df)
+    # Construire la cible à 9 heures avec ce seuil
     df = creer_cible_degradation(df, df_alarmes)
+
     return df
 
 
 def controler_resultat(df):
+
     print("\n=== CONTROLE DU DATASET ===")
+
     print("Dimensions :", df.shape)
     print("Période :", df["date"].min(), "→", df["date"].max())
     print("Équipements :", df["id_equipement"].nunique())
-    print("Répartition de la cible (y compris NaN) :")
-    print(df["degradation_9h"].value_counts(dropna=False).to_string())
-    print("Exemple :")
-    print(df[["id_equipement", "date", "performance_moyenne_future_9h", "degradation_9h"]].head(8).to_string(index=False))
-    print("\nATTENTION : cible exploratoire, valider la définition métier de performance.")
-    print("ATTENTION : contrôler les imputations ETL (bfill/interpolation utilisant le futur).")
-    print("Ne jamais inclure performance_moyenne_future_9h ou performance_hors_eclipse comme features futures.")
+
+    # =====================================================
+    # 1. REPARTITION DE LA CIBLE
+    # =====================================================
+
+    print("\nRépartition de la cible (y compris NaN) :")
+
+    print(
+        df["degradation_9h"].value_counts(dropna=False)
+    )
+
+    print("\nRépartition de la cible par équipement :")
+
+    print(
+        pd.crosstab(
+            [df["id_equipement"], df["type_equipement"]],
+            df["degradation_9h"],
+            dropna=False
+        ).to_string()
+    )
+
+    # =====================================================
+    # 2. PERFORMANCE HORS ECLIPSE
+    # =====================================================
+
+    print("\nPerformance hors éclipse par équipement :")
+
+    print(
+        df.groupby(["id_equipement", "type_equipement"])[
+            "performance_hors_eclipse"
+        ]
+        .agg(["min", "mean", "max"])
+        .round(3)
+        .to_string()
+    )
+
+    # =====================================================
+    # 3. COMPARAISON DES SEUILS
+    # =====================================================
+
+    print("\nComparaison des seuils par équipement :")
+
+    print(
+        df.groupby(["id_equipement", "type_equipement"])[
+            [
+                "performance_initiale",
+                "performance_reference",
+                "seuil_glissant",
+                "seuil_plancher",
+                "seuil_degradation"
+            ]
+        ]
+        .mean()
+        .round(3)
+        .to_string()
+    )
+
+    # =====================================================
+    # 4. VERIFIER SI LE PLANCHER INTERVIENT
+    # =====================================================
+
+    print("\nNombre de fois où le plancher intervient :")
+
+    print(
+        df.assign(
+            plancher_actif=(
+                df["seuil_plancher"] > df["seuil_glissant"]
+            )
+        )
+        .groupby("id_equipement")["plancher_actif"]
+        .sum()
+        .to_string()
+    )
+
+    # =====================================================
+    # 5. EVOLUTION JOURNALIERE DES SEUILS
+    # =====================================================
+
+    print("\nEvolution des seuils par jour :")
+
+    print(
+        df.assign(
+            jour_analyse=df["date"].dt.date
+        )
+        .groupby(["id_equipement", "jour_analyse"])[
+            [
+                "performance_reference",
+                "seuil_glissant",
+                "seuil_plancher",
+                "seuil_degradation"
+            ]
+        ]
+        .mean()
+        .round(3)
+        .to_string()
+    )
+
+    # =====================================================
+    # 6. EXEMPLE DES CIBLES CALCULEES
+    # =====================================================
+
+    print("\nExemple des premières mesures :")
+
+    print(
+        df[
+            [
+                "id_equipement",
+                "date",
+                "performance_reference",
+                "seuil_degradation",
+                "performance_moyenne_future_9h",
+                "degradation_9h"
+            ]
+        ]
+        .head(8)
+        .to_string(index=False)
+    )
+
+    # =====================================================
+    # 7. POINTS DE VIGILANCE
+    # =====================================================
+
+    print(
+        "\nATTENTION : cible exploratoire, "
+        "valider la définition métier de performance."
+    )
+
+    print(
+        "ATTENTION : contrôler les imputations ETL "
+        "(bfill/interpolation utilisant le futur)."
+    )
+
+    print(
+        "ATTENTION : attendre la correction des id_orbite "
+        "pour valider les résultats définitifs."
+    )
+
+    print(
+        "Ne jamais inclure performance_moyenne_future_9h "
+        "ou performance_hors_eclipse comme variables futures."
+    )
 
 
 def afficher_matrice_correlation(df, chemin_sortie, nombre_max=25):
@@ -374,10 +823,8 @@ def afficher_matrice_correlation(df, chemin_sortie, nombre_max=25):
 def main():
     racine = Path(__file__).resolve().parent
     analyseur = argparse.ArgumentParser(description="Préparation des données ML Orbitalis")
-    analyseur.add_argument("--bdd-analytique", type=Path,
-                           default=racine / "data" / "orbital_data_center_analytics.db")
-    analyseur.add_argument("--bdd-clean", type=Path,
-                           default=racine / "data" / "orbital_data_center_clean.db")
+    analyseur.add_argument("--bdd-analytique", type=Path, default=DB_PATH)
+    analyseur.add_argument("--bdd-clean", type=Path, default=BASE_DIR / "data" / "propre" / "orbital_data_center_clean.db")
     analyseur.add_argument("--mode", choices=["test", "complet"], default="test")
     analyseur.add_argument("--sortie", type=Path, default=racine / "data" / "ml")
     analyseur.add_argument("--correlation", action="store_true")
@@ -395,7 +842,7 @@ def main():
         ids = df["id_equipement"].dropna().drop_duplicates().head(3)
         df = df[
             df["id_equipement"].isin(ids)
-            & (df["date"] < premier_jour + pd.Timedelta(days=4))
+            & (df["date"] < premier_jour + pd.Timedelta(days=45))
         ].copy()
         print(f"Mode test : {len(df):,} mesures sur 3 équipements maximum / 4 jours")
 
@@ -420,36 +867,4 @@ def main():
 
 
 if __name__ == "__main__":
-
-    if not DB_PATH.is_file():
-        raise FileNotFoundError(f"Base introuvable : {DB_PATH}")
-
-    with sqlite3.connect(DB_PATH) as connexion:
-        print("Connexion SQLite réussie !")
-
-        tables = pd.read_sql_query(
-            "SELECT name FROM sqlite_master WHERE type = 'table'",
-            connexion
-        )
-
-        print(tables)
-
-    with sqlite3.connect(DB_PATH) as connexion:
-
-        for table in [
-            "fait_production",
-            "dim_temps",
-            "dim_equipement",
-            "dim_orbite",
-            "dim_alarme",
-            "dim_maintenance"
-        ]:
-
-            colonnes = pd.read_sql_query(
-                f"PRAGMA table_info({table})",
-                connexion
-            )
-
-            print(f"\nTable : {table}")
-            print(colonnes["name"].tolist())
-
+    main()
